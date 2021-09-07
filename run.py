@@ -27,17 +27,17 @@ import experiments
 def main(raw_args):
     parser = argparse.ArgumentParser(description="Scale Mixtures of NNGP")
     subparsers = parser.add_subparsers(dest="command", metavar="command", required=True)
+
     experiments.add_subparser(subparsers)
+
     args = parser.parse_args(raw_args)
-
     main_func = args.func
-    main_args = {
-        key: value
-        for key, value in vars(args).items()
-        if (key != "func" and key != "command")
-    }
 
-    main_func(**main_args)
+    try:
+        main_func(args)
+        print(raw_args)
+    except KeyboardInterrupt:
+        print("Stopped")
 
 
 if __name__ == "__main__":
