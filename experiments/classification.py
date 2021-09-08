@@ -1,3 +1,6 @@
+import os
+from datetime import datetime
+
 from tqdm import tqdm
 from sklearn.cluster import KMeans
 
@@ -10,11 +13,11 @@ from objax.optimizer import SGD, Adam
 from neural_tangents import stax
 
 from spax.models import SVSP
-from spax.kernels import NNGPKernel, NNGPKernelParams
+from spax.kernels import NNGPKernel
 from spax.priors import GaussianPrior, InverseGammaPrior
 
 from .data.classification import get_dataset, datasets
-from .utils import TrainBatch, TestBatch
+from .utils import TrainBatch, TestBatch, Checkpointer
 
 
 def add_subparser(subparsers):
@@ -25,13 +28,13 @@ def add_subparser(subparsers):
     parser.add_argument("-dn",  "--data-name",         choices=datasets, required=True)
     parser.add_argument("-tdn", "--test-data-name",    choices=datasets, default=None)
     parser.add_argument("-dr",  "--data-root",         type=str, default="./data")
-    parser.add_argument("-lgr", "--log-root",          type=str, default="./_log")
-    parser.add_argument("-ln",  "--log-name",          type=str)
+    parser.add_argument("-cr",  "--ckpt-root",         type=str, default="./ckpt")
+    parser.add_argument("-cn",  "--ckpt-name",         type=str, default=None)
 
     parser.add_argument("-ntr",  "--num-train",        type=int, default=None)
     parser.add_argument("-nts",  "--num-test",         type=int, default=None)
     parser.add_argument("-nb",   "--num-batch",        type=int, default=128)
-    parser.add_argument("-ni",   "--num-induce",       type=int, default=100)
+    parser.add_argument("-ni",   "--num-inducing",     type=int, default=200)
     parser.add_argument("-ntrs", "--num-train-sample", type=int, default=100)
     parser.add_argument("-ntss", "--num-test-sample",  type=int, default=10000)
 
@@ -74,6 +77,19 @@ def get_act_class(act):
         raise KeyError("Unsupported act '{}'".format(act))
 
 
+def get_mlp_kernel(num_hiddens, num_classes, act="relu", w_std=1., b_std=0., last_w_std=1.):
+    act_class = get_act_class(act)
+
+    layers = []
+    for _ in range(num_hiddens):
+        layers.append(stax.Dense(512, W_std=w_std, b_std=b_std))
+        layers.append(act_class())
+    layers.append(stax.Dense(num_classes, W_std=last_w_std))
+
+    _, _, kernel_fn = stax.serial(*layers)
+    return  kernel_fn
+
+
 def get_cnn_kernel(num_hiddens, num_classes, act="relu", w_std=1., b_std=0., last_w_std=1.):
     act_class = get_act_class(act)
 
@@ -85,24 +101,49 @@ def get_cnn_kernel(num_hiddens, num_classes, act="relu", w_std=1., b_std=0., las
     layers.append(stax.Dense(num_classes, W_std=last_w_std))
 
     _, _, kernel_fn = stax.serial(*layers)
-    # kernel_fn = jit(kernel_fn, static_argnums=(2,))
-
     return  kernel_fn
 
 
-def get_mlp_kernel(num_hiddens, num_classes, act="relu", w_std=1., b_std=0., last_w_std=1.):
+def get_resnet_kernel(
+    depth,
+    class_num,
+    act="relu",
+    w_std=1.,
+    b_std=0.,
+    last_w_std=1.,
+):
     act_class = get_act_class(act)
 
-    layers = []
-    for _ in range(num_hiddens):
-        layers.append(stax.Dense(512, W_std=w_std, b_std=b_std))
-        layers.append(act_class())
-    layers.append(stax.Dense(num_classes, W_std=last_w_std))
+    def WideResnetBlock(channels, strides=(1, 1), channel_mismatch=False):
+        Main = stax.serial(
+            act_class(), stax.Conv(channels, (3, 3), strides, padding="SAME", W_std=w_std, b_std=b_std),
+            act_class(), stax.Conv(channels, (3, 3), padding="SAME", W_std=w_std, b_std=b_std))
+        Shortcut = stax.Identity() if not channel_mismatch else stax.Conv(
+            channels, (3, 3), strides, padding="SAME", W_std=w_std, b_std=b_std)
+        return stax.serial(stax.FanOut(2),
+                           stax.parallel(Main, Shortcut),
+                           stax.FanInSum())
 
-    _, _, kernel_fn = stax.serial(*layers)
-    kernel_fn = jit(kernel_fn, static_argnums=(2,))
+    def WideResnetGroup(n, channels, strides=(1, 1)):
+        blocks = []
+        blocks += [WideResnetBlock(channels, strides, channel_mismatch=True)]
+        for _ in range(n - 1):
+            blocks += [WideResnetBlock(channels, (1, 1))]
+        return stax.serial(*blocks)
 
-    return  kernel_fn
+    def WideResnet(block_size, k, num_classes):
+        return stax.serial(
+            stax.Conv(16, (3, 3), padding="SAME", W_std=w_std, b_std=b_std),
+            WideResnetGroup(block_size, int(8 * k)),
+            WideResnetGroup(block_size, int(16 * k), (2, 2)),
+            WideResnetGroup(block_size, int(32 * k), (2, 2)),
+            WideResnetGroup(block_size, int(64 * k), (2, 2)),
+            # stax.AvgPool((8, 8)),
+            stax.Flatten(),
+            stax.Dense(num_classes, W_std=last_w_std))
+
+    _, _, kernel_fn = WideResnet(block_size=depth, k=1, num_classes=class_num)
+    return kernel_fn
 
 
 def build_train_batch(model, optimizer, learning_rate, num_batch, num_train, num_samples, jit=True):
@@ -123,7 +164,22 @@ def build_test_batch(model, num_batch, num_samples, jit=True):
 
 def main(args):
     # Log
-    # TODO
+    if not args.ckpt_name:
+        if args.test_data_name:
+            args.ckpt_name = args.test_data_name
+        else:
+            args.ckpt_name = args.data_name
+        args.ckpt_name += f"/{args.method}"
+        args.ckpt_name += f"/ni{args.num_inducing}-nh{args.num_hiddens}-ws{args.w_std:.1f}-bs{args.b_std:.1f}-ls{args.last_w_std:.1f}"
+        if args.method == "svtp":
+            args.ckpt_name += f"-a{args.alpha:.1f}-b{args.beta:.1f}"
+        if args.kmeans:
+            args.ckpt_name += "-km"
+        args.ckpt_name += f"-s{args.seed}"
+        args.ckpt_name += f"/{str(datetime.now().strftime('%y%m%d%H%M'))}"
+
+    ckpt_dir = os.path.join(os.path.expanduser(args.ckpt_root), args.ckpt_name)
+    checkpointer = Checkpointer(ckpt_dir, keep_ckpts=10)
 
     # Dataset
     dataset = get_dataset(
@@ -151,7 +207,8 @@ def main(args):
 
     # Kernel
     if dataset_info["type"] == "image":
-        base_kernel_fn = get_cnn_kernel
+        # base_kernel_fn = get_cnn_kernel
+        base_kernel_fn = get_resnet_kernel
     elif dataset_info["type"] == "feature":
         base_kernel_fn = get_mlp_kernel
     else:
@@ -163,14 +220,13 @@ def main(args):
             w_std=w_std, b_std=b_std, last_w_std=last_w_std,
         )
 
-    kernel = NNGPKernel(get_kernel_fn)
-    kernel_params = NNGPKernelParams(args.w_std, args.b_std, args.last_w_std)
+    kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, args.last_w_std)
 
     # Model
     if args.kmeans:
-        inducing_points = get_inducing_points(x_train, y_train, args.num_induce, num_class)
+        inducing_points = get_inducing_points(x_train, y_train, args.num_inducing, num_class)
     else:
-        inducing_points = x_train[:args.num_induce]
+        inducing_points = x_train[:args.num_inducing]
 
     if args.method == "svgp":
         prior = GaussianPrior()
@@ -179,7 +235,7 @@ def main(args):
     else:
         raise ValueError(f"Unsupported method '{args.method}'")
 
-    model = SVSP(prior, kernel, kernel_params, inducing_points, num_latent_gps=num_class)
+    model = SVSP(prior, kernel, inducing_points, num_latent_gps=num_class)
 
     print()
     print(model.vars(), end="\n\n")
@@ -203,7 +259,6 @@ def main(args):
     test_batches = TestBatch(x_test, y_test, num_test_batch)
 
     # Train
-    # NOTE: Be careful to update kernel
     key = random.PRNGKey(args.seed)
 
     best_model_acc = 0.
@@ -216,7 +271,7 @@ def main(args):
         n_elbo = train_batch(split_key, x_batch, y_batch)
 
         if i % args.print_interval == 0:
-            ws, bs, ls = model.kernel_params.get_params()
+            ws, bs, ls = model.kernel.get_params()
 
             if args.method == "svtp":
                 ia, ib = (model.prior.a.safe_value, model.prior.b.safe_value)
@@ -227,9 +282,7 @@ def main(args):
             tqdm.write(f"[{i:5d}] " + print_str)
 
         if i % args.test_interval == 0 or i == args.steps - 1:
-            params = model.kernel_params.get_params()
-            model.kernel.cache_kernel_fn(params)
-
+            key, split_key = random.split(key)
             test_nll_list = []
             total_corrects = 0
 
@@ -245,13 +298,9 @@ def main(args):
             tqdm.write(f"[{i:5d}] NLL: {test_nll:.5f}  ACC: {test_acc:.4f}")
 
             if test_acc > best_model_acc or (jnp.allclose(test_acc, best_model_acc) and test_nll > best_model_nll):
-                update_best = True
-            else:
-                update_best = False
-
-            if update_best:
                 best_step, best_model_acc, best_model_nll = i, test_acc, test_nll
                 best_print_str = print_str
+                checkpointer.save(model.vars(), i)
                 tqdm.write(f"[{i:5d}] Updated: NLL: {test_nll:.5f}  ACC: {test_acc:.4f}")
 
     print()

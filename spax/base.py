@@ -2,10 +2,7 @@ from typing import Optional, Callable
 
 from objax.typing import JaxArray
 from objax.module import Module
-from objax.variable import (
-    TrainVar,
-    reduce_mean,
-)
+from objax.variable import TrainVar, reduce_mean
 
 
 __all__ = [

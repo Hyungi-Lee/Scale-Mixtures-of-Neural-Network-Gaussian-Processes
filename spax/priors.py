@@ -19,6 +19,7 @@ class GaussianPrior(Prior):
         return sampled_f
 
     def sample_f(self, key, mean, cov, num_samples):
+        # key = random.PRNGKey(10)
         sampled_f = random.multivariate_normal(key, mean, cov, shape=(num_samples,))
         return sampled_f
 

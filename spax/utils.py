@@ -87,7 +87,7 @@ def log_likelihood(label, sampled_f):
 def test_log_likelihood(label, sampled_f, sample_num):
     sampled_f_softmax = log_softmax(sampled_f)
     true_label_softmax = get_true_values(sampled_f_softmax, label)
-    ll = jnp.sum(logsumexp(true_label_softmax.T) - jnp.log(sample_num))
+    ll = jnp.sum(logsumexp(true_label_softmax.T) - np.log(sample_num))
     return ll
 
 

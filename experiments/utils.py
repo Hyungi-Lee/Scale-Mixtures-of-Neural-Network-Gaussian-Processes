@@ -1,10 +1,18 @@
+from typing import Optional
+import os
+import glob
+
 from jax import random
 from jax import numpy as jnp
+
+from objax.io import Checkpoint
+from objax.variable import VarCollection
 
 
 __all__ = [
     "TrainBatch",
     "TestBatch",
+    "Checkpointer",
 ]
 
 
@@ -68,3 +76,37 @@ class TestBatch:
         self.batch_i += 1
 
         return x_batch, y_batch
+
+
+
+class Checkpointer(Checkpoint):
+    FILE_MATCH: str = "*.npz"
+    FILE_FORMAT: str = "%05d.npz"
+
+    def __init__(self, logdir: str, keep_ckpts: int, makedir: bool = True, verbose: bool = True):
+        self.logdir = logdir
+        self.keep_ckpts = keep_ckpts
+        self.verbose = verbose
+        if makedir:
+            os.makedirs(logdir, exist_ok=True)
+
+    def restore(self, vc: VarCollection, idx: Optional[int] = None):
+        assert isinstance(vc, VarCollection), f"Must pass a VarCollection to restore; received type {type(vc)}."
+        if idx is None:
+            all_ckpts = glob.glob(os.path.join(self.logdir, self.FILE_MATCH))
+            if not all_ckpts:
+                if self.verbose:
+                    print("No checkpoints found. Skipping restoring variables.")
+                return 0, ""
+            idx = self.checkpoint_idx(max(all_ckpts))
+        ckpt = os.path.join(self.logdir, self.FILE_FORMAT % idx)
+        if self.verbose:
+            print("Resuming from", ckpt)
+        self.LOAD_FN(ckpt, vc)
+        return idx, ckpt
+
+    def save(self, vc: VarCollection, idx: int):
+        assert isinstance(vc, VarCollection), f"Must pass a VarCollection to save; received type {type(vc)}."
+        self.SAVE_FN(os.path.join(self.logdir, self.FILE_FORMAT % idx), vc)
+        for ckpt in sorted(glob.glob(os.path.join(self.logdir, self.FILE_MATCH)))[:-self.keep_ckpts]:
+            os.remove(ckpt)

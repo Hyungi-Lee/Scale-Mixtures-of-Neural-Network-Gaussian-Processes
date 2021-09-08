@@ -15,7 +15,6 @@ class SVSP(Module):
         self,
         prior,
         kernel,
-        kernel_params,
         inducing_variable,
         *,
         num_latent_gps: int = 1,
@@ -23,7 +22,6 @@ class SVSP(Module):
         super().__init__()
         self.prior = prior
         self.kernel = kernel
-        self.kernel_params = kernel_params
         self.num_latent_gps = num_latent_gps
         self.inducing_variable = TrainVar(jnp.array(inducing_variable))
         self.num_inducing = self.inducing_variable.shape[0]
@@ -55,13 +53,10 @@ class SVSP(Module):
         inducing_variable = self.inducing_variable.value
         q_mu = self.q_mu.value
         q_sigma = jnp.diag(self.q_sqrt.safe_value)
-        w_std = self.kernel_params.w_std.safe_value
-        b_std = self.kernel_params.b_std.safe_value
-        last_w_std = self.kernel_params.last_w_std.safe_value
-        kernel_fn = self.kernel.get_kernel_fn(w_std, b_std, last_w_std)
+        kernel_fn = self.kernel.get_kernel_fn()
 
-        k_batch_induced = self.kernel.K(kernel_fn, jnp.concatenate((x_batch, inducing_variable), axis=0))
-        _, k_bi, _, k_ii = split_kernel(k_batch_induced, num_batch)
+        k_batch_induced = self.kernel.K(kernel_fn, jnp.concatenate((inducing_variable, x_batch), axis=0))
+        k_ii, _, k_bi, _ = split_kernel(k_batch_induced, self.num_inducing)
         k_ii_inv = jnp.linalg.inv(k_ii + jitter(self.num_inducing))
 
         mean, cov_L = self.mean_cov(x_batch, q_mu, q_sigma, kernel_fn, k_bi, k_ii_inv)
@@ -80,10 +75,10 @@ class SVSP(Module):
         inducing_variable = self.inducing_variable.value
         q_mu = self.q_mu.value
         q_sigma = jnp.diag(self.q_sqrt.safe_value)
-        kernel_fn = self.kernel.get_cached_kernel_fn()
+        kernel_fn = self.kernel.get_kernel_fn()
 
         k_batch_induced = self.kernel.K(kernel_fn, jnp.concatenate((x_batch, inducing_variable), axis=0))
-        _, k_bi, _, k_ii = split_kernel(k_batch_induced, num_batch)
+        k_ii, _, k_bi, _ = split_kernel(k_batch_induced, self.num_inducing)
         k_ii_inv = jnp.linalg.inv(k_ii + jitter(self.num_inducing))
 
         # L_induced = jnp.linalg.cholesky(kernel_i_i)
