@@ -17,19 +17,20 @@ from spax.kernels import NNGPKernel
 from spax.priors import GaussianPrior, InverseGammaPrior
 
 from .data.classification import get_dataset, datasets
-from .utils import TrainBatch, TestBatch, Checkpointer
+from .utils import TrainBatch, TestBatch, Checkpointer, Logger
 
 
 def add_subparser(subparsers):
     parser = subparsers.add_parser("classification", aliases=["cls"])
     parser.set_defaults(func=main)
 
-    parser.add_argument("-m",   "--method",            choices=["svgp", "svtp"], required=True)
-    parser.add_argument("-dn",  "--data-name",         choices=datasets, required=True)
-    parser.add_argument("-tdn", "--test-data-name",    choices=datasets, default=None)
-    parser.add_argument("-dr",  "--data-root",         type=str, default="./data")
-    parser.add_argument("-cr",  "--ckpt-root",         type=str, default="./ckpt")
-    parser.add_argument("-cn",  "--ckpt-name",         type=str, default=None)
+    parser.add_argument("-m",    "--method",           choices=["svgp", "svtp"], required=True)
+    parser.add_argument("-n",    "--network",          choices=["cnn", "resnet", "mlp"], default=None)
+    parser.add_argument("-dn",   "--data-name",        choices=datasets, required=True)
+    parser.add_argument("-tdn",  "--test-data-name",   choices=datasets, default=None)
+    parser.add_argument("-dr",   "--data-root",        type=str, default="./data")
+    parser.add_argument("-cr",   "--ckpt-root",        type=str, default="./ckpt")
+    parser.add_argument("-cn",   "--ckpt-name",        type=str, default=None)
 
     parser.add_argument("-ntr",  "--num-train",        type=int, default=None)
     parser.add_argument("-nts",  "--num-test",         type=int, default=None)
@@ -55,6 +56,7 @@ def add_subparser(subparsers):
     parser.add_argument("-s",    "--seed",             type=int, default=10)
     parser.add_argument("-pi",   "--print-interval",   type=int, default=100)
     parser.add_argument("-ti",   "--test-interval",    type=int, default=500)
+    parser.add_argument("-q",    "--quite",            default=False, action="store_true")
 
 
 def get_inducing_points(X, Y, num_inducing, num_classes):
@@ -180,6 +182,7 @@ def main(args):
 
     ckpt_dir = os.path.join(os.path.expanduser(args.ckpt_root), args.ckpt_name)
     checkpointer = Checkpointer(ckpt_dir, keep_ckpts=10)
+    logger = Logger(ckpt_dir, quite=args.quite)
 
     # Dataset
     dataset = get_dataset(
@@ -203,13 +206,18 @@ def main(args):
     num_train = x_train.shape[0]
     num_test = x_test.shape[0]
 
-    print(f"{num_train = }, {num_test = }")
-
     # Kernel
     if dataset_info["type"] == "image":
-        # base_kernel_fn = get_cnn_kernel
-        base_kernel_fn = get_resnet_kernel
+        assert args.network is None or args.network in ["cnn", "resnet"], "Only CNN and ResNet are supported for image dataset"
+        if args.network is None or args.network == "cnn":
+            args.network = "cnn"
+            base_kernel_fn = get_cnn_kernel
+        else:
+            args.network = "resnet"
+            base_kernel_fn = get_resnet_kernel
     elif dataset_info["type"] == "feature":
+        assert args.network is None or args.network in ["mlp"], "Only MLP is supported for feature dataset"
+        args.network = "mlp"
         base_kernel_fn = get_mlp_kernel
     else:
         raise ValueError(f"Unsupported dataset '{dataset}'")
@@ -258,6 +266,37 @@ def main(args):
     train_batches = TrainBatch(x_train, y_train, args.num_batch, args.steps, args.seed)
     test_batches = TestBatch(x_test, y_test, num_test_batch)
 
+    # Log
+    logger.log("Args:")
+    logger.log("  method          : ", args.method)
+    logger.log("  network         : ", args.network)
+    logger.log("  data-name       : ", args.data_name)
+    logger.log("  test-data-name  : ", args.test_data_name)
+    logger.log("  data-root       : ", args.data_root)
+    logger.log("  ckpt-root       : ", args.ckpt_root)
+    logger.log("  ckpt-name       : ", args.ckpt_name)
+    logger.log("  num-train       : ", num_train)
+    logger.log("  num-test        : ", num_test)
+    logger.log("  num-batch       : ", args.num_batch)
+    logger.log("  num-inducing    : ", args.num_inducing)
+    logger.log("  num-train-sample: ", args.num_train_sample)
+    logger.log("  num-test-sample : ", args.num_test_sample)
+    logger.log("  alpha           : ", args.alpha)
+    logger.log("  beta            : ", args.beta)
+    logger.log("  num-hiddens     : ", args.num_hiddens)
+    logger.log("  activation      : ", args.activation)
+    logger.log("  w-std           : ", args.w_std)
+    logger.log("  b-std           : ", args.b_std)
+    logger.log("  last-w-std      : ", args.last_w_std)
+    logger.log("  optimizer       : ", args.optimizer)
+    logger.log("  learning-rate   : ", args.learning_rate)
+    logger.log("  steps           : ", args.steps)
+    logger.log("  kmeans          : ", args.kmeans)
+    logger.log("  seed            : ", args.seed)
+    logger.log("  print-interval  : ", args.print_interval)
+    logger.log("  test-interval   : ", args.test_interval)
+    logger.log("")
+
     # Train
     key = random.PRNGKey(args.seed)
 
@@ -279,7 +318,7 @@ def main(args):
             else:
                 print_str = f"nELBO: {n_elbo:.5f}  ws: {ws:.4f}  bs: {bs:.3E}  ls: {ls:.4f}"
 
-            tqdm.write(f"[{i:5d}] " + print_str)
+            logger.log(f"[{i:5d}] " + print_str, is_tqdm=True)
 
         if i % args.test_interval == 0 or i == args.steps - 1:
             key, split_key = random.split(key)
@@ -295,14 +334,16 @@ def main(args):
             test_nll = (jnp.sum(jnp.array(test_nll_list)) / num_test).item()
             test_acc = (total_corrects / num_test).item()
 
-            tqdm.write(f"[{i:5d}] NLL: {test_nll:.5f}  ACC: {test_acc:.4f}")
+            logger.log(f"[{i:5d}] NLL: {test_nll:.5f}  ACC: {test_acc:.4f}", is_tqdm=True)
 
             if test_acc > best_model_acc or (jnp.allclose(test_acc, best_model_acc) and test_nll > best_model_nll):
                 best_step, best_model_acc, best_model_nll = i, test_acc, test_nll
                 best_print_str = print_str
-                checkpointer.save(model.vars(), i)
-                tqdm.write(f"[{i:5d}] Updated: NLL: {test_nll:.5f}  ACC: {test_acc:.4f}")
+                checkpointer.save(model.vars() + optimizer.vars(), i)
+                logger.log(f"[{i:5d}] Updated: NLL: {test_nll:.5f}  ACC: {test_acc:.4f}", is_tqdm=True)
 
-    print()
-    print(f"[{best_step:5d}] NLL: {best_model_nll:.5f}  ACC: {best_model_acc:.4f} " + best_print_str)
-    print()
+    logger.log("")
+    logger.log(f"[{best_step:5d}] NLL: {best_model_nll:.5f}  ACC: {best_model_acc:.4f} " + best_print_str)
+    logger.log("")
+
+    logger.close()

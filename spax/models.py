@@ -81,12 +81,12 @@ class SVSP(Module):
         k_ii, _, k_bi, _ = split_kernel(k_batch_induced, self.num_inducing)
         k_ii_inv = jnp.linalg.inv(k_ii + jitter(self.num_inducing))
 
-        # L_induced = jnp.linalg.cholesky(kernel_i_i)
-        # L_induced = kron_diag(L_induced, n=class_num)
+        # L_induced = jnp.linalg.cholesky(k_ii)
+        # L_induced = kron_diag(L_induced, n=self.num_inducing)
         # L_mu = matmul(L_induced, inducing_mu)
         L_mu = q_mu
 
-        # A_L = matmul3(kernel_t_i, kernel_i_i_inverse, L_induced)
+        # A_L = matmul3(k_bi, k_ii_inv, L_induced)
         A_L = jnp.matmul(k_bi, k_ii_inv)
         A_L = kron_diag(A_L, n=self.num_latent_gps)
 

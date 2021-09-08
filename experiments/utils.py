@@ -2,6 +2,8 @@ from typing import Optional
 import os
 import glob
 
+from tqdm import tqdm
+
 from jax import random
 from jax import numpy as jnp
 
@@ -13,7 +15,9 @@ __all__ = [
     "TrainBatch",
     "TestBatch",
     "Checkpointer",
+    "Logger",
 ]
+
 
 
 class TrainBatch:
@@ -78,7 +82,6 @@ class TestBatch:
         return x_batch, y_batch
 
 
-
 class Checkpointer(Checkpoint):
     FILE_MATCH: str = "*.npz"
     FILE_FORMAT: str = "%05d.npz"
@@ -110,3 +113,27 @@ class Checkpointer(Checkpoint):
         self.SAVE_FN(os.path.join(self.logdir, self.FILE_FORMAT % idx), vc)
         for ckpt in sorted(glob.glob(os.path.join(self.logdir, self.FILE_MATCH)))[:-self.keep_ckpts]:
             os.remove(ckpt)
+
+
+class Logger:
+    FILE_NAME: str = "train.log"
+
+    def __init__(self, logdir: str, makedir: bool = True, quite: bool = False):
+        self.logdir = logdir
+        self.quite = quite
+        if makedir:
+            os.makedirs(logdir, exist_ok=True)
+        self.logfile = open(os.path.join(logdir, self.FILE_NAME), "w")
+
+    def log(self, *args, is_tqdm: bool = False):
+        s = "".join(map(str, args))
+        self.logfile.write(s + "\n")
+        if not self.quite:
+            if is_tqdm:
+                tqdm.write(s)
+            else:
+                print(s, flush=True)
+        self.logfile.flush()
+
+    def close(self):
+        self.logfile.close()
