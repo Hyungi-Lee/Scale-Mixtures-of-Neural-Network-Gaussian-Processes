@@ -7,11 +7,12 @@ from tqdm import tqdm
 from jax import random
 from jax import numpy as jnp
 
-from objax.io import Checkpoint
 from objax.variable import VarCollection
+from objax.io.ops import load_var_collection, save_var_collection
 
 
 __all__ = [
+    "get_context_summary",
     "TrainBatch",
     "TestBatch",
     "Checkpointer",
@@ -19,13 +20,27 @@ __all__ = [
 ]
 
 
+def get_context_summary(args, values_dict, indent=2):
+    args_dict = {k: v for k, v in vars(args).items() if k != "func"}
+    key_max_len = max(map(len, list(args_dict.keys()) + list(values_dict.keys())))
+
+    s = "Args:\n"
+    for k, v in args_dict.items():
+        s += f"{' ' * indent}{k.ljust(key_max_len)}: {v}\n"
+
+    s += "\nValues:\n"
+    for k, v in values_dict.items():
+        s += f"{' ' * indent}{k.ljust(key_max_len)}: {v}\n"
+
+    s += "\n"
+    return s
+
 
 class TrainBatch:
-    def __init__(self, x, y, batch_size, steps=100, seed=0):
+    def __init__(self, x, y, batch_size, seed=0):
         self.x = x
         self.y = y
         self.batch_size = batch_size
-        self.steps = steps
         self.seed = seed
 
     def __iter__(self):
@@ -33,15 +48,8 @@ class TrainBatch:
         self.step = 0
         return self
 
-    def __len__(self):
-        return self.steps
-
     def __next__(self):
-        if self.step >= self.steps:
-            raise StopIteration
-        else:
-            self.step += 1
-
+        self.step += 1
         self.key, split = random.split(self.key)
 
         random_idxs = random.permutation(split, jnp.arange(self.x.shape[0], dtype=int))
@@ -82,37 +90,41 @@ class TestBatch:
         return x_batch, y_batch
 
 
-class Checkpointer(Checkpoint):
+class Checkpointer:
     FILE_MATCH: str = "*.npz"
-    FILE_FORMAT: str = "%05d.npz"
+    FILE_FORMAT: str = "{:06d}.npz"
 
-    def __init__(self, logdir: str, keep_ckpts: int, makedir: bool = True, verbose: bool = True):
+    def __init__(
+        self,
+        logdir: str,
+        keep_ckpts: int = 10,
+        makedir: bool = True,
+        patience: int = 10,
+    ):
         self.logdir = logdir
         self.keep_ckpts = keep_ckpts
-        self.verbose = verbose
+        self.patience = patience
         if makedir:
             os.makedirs(logdir, exist_ok=True)
+        self.best_losses = [float("inf")]
 
-    def restore(self, vc: VarCollection, idx: Optional[int] = None):
-        assert isinstance(vc, VarCollection), f"Must pass a VarCollection to restore; received type {type(vc)}."
-        if idx is None:
-            all_ckpts = glob.glob(os.path.join(self.logdir, self.FILE_MATCH))
-            if not all_ckpts:
-                if self.verbose:
-                    print("No checkpoints found. Skipping restoring variables.")
-                return 0, ""
-            idx = self.checkpoint_idx(max(all_ckpts))
-        ckpt = os.path.join(self.logdir, self.FILE_FORMAT % idx)
-        if self.verbose:
-            print("Resuming from", ckpt)
-        self.LOAD_FN(ckpt, vc)
-        return idx, ckpt
-
-    def save(self, vc: VarCollection, idx: int):
+    def save(self, idx: int, vc: VarCollection):
         assert isinstance(vc, VarCollection), f"Must pass a VarCollection to save; received type {type(vc)}."
-        self.SAVE_FN(os.path.join(self.logdir, self.FILE_FORMAT % idx), vc)
+        save_var_collection(os.path.join(self.logdir, self.FILE_FORMAT.format(idx)), vc)
         for ckpt in sorted(glob.glob(os.path.join(self.logdir, self.FILE_MATCH)))[:-self.keep_ckpts]:
             os.remove(ckpt)
+
+    def step(self, idx, loss, vc):
+        updated, stop = False, False
+
+        if loss < self.best_losses[0]:
+            self.save(idx, vc)
+            updated = True
+        elif loss > self.best_losses[-1] and len(self.best_losses) == self.patience:
+            stop = True
+
+        self.best_losses = sorted(self.best_losses + [loss])[:self.patience]
+        return updated, stop
 
 
 class Logger:

@@ -27,8 +27,8 @@ class SVSP(Module):
         self.num_inducing = self.inducing_variable.shape[0]
         self.q_mu = TrainVar(jnp.zeros((self.num_inducing * self.num_latent_gps)))
         self.q_sqrt = ConstraintTrainVar(
-            # jnp.ones((self.num_inducing * self.num_latent_gps)),
-            jnp.full((self.num_inducing * self.num_latent_gps), 1e-6),
+            jnp.ones((self.num_inducing * self.num_latent_gps)),
+            # jnp.full((self.num_inducing * self.num_latent_gps), 1e-6),
             constraint=positive(),
         )
 

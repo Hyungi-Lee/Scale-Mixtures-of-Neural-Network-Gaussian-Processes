@@ -35,7 +35,6 @@ def main(raw_args):
 
     try:
         main_func(args)
-        print(raw_args)
     except KeyboardInterrupt:
         print("Stopped")
 

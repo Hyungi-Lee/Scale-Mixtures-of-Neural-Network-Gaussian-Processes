@@ -2,9 +2,8 @@ import os
 from datetime import datetime
 
 from tqdm import tqdm
-from sklearn.cluster import KMeans
 
-from jax import jit, random
+from jax import random
 from jax import numpy as jnp
 
 import objax
@@ -16,12 +15,12 @@ from spax.models import SVSP
 from spax.kernels import NNGPKernel
 from spax.priors import GaussianPrior, InverseGammaPrior
 
-from .data.classification import get_dataset, datasets
-from .utils import TrainBatch, TestBatch, Checkpointer, Logger
+from .data import get_test_dataset, datasets
+from ..utils import TrainBatch, TestBatch, Checkpointer, Logger
 
 
 def add_subparser(subparsers):
-    parser = subparsers.add_parser("classification", aliases=["cls"])
+    parser = subparsers.add_parser("test", aliases=["ts"])
     parser.set_defaults(func=main)
 
     parser.add_argument("-m",    "--method",           choices=["svgp", "svtp"], required=True)
@@ -30,44 +29,16 @@ def add_subparser(subparsers):
     parser.add_argument("-tdn",  "--test-data-name",   choices=datasets, default=None)
     parser.add_argument("-dr",   "--data-root",        type=str, default="./data")
     parser.add_argument("-cr",   "--ckpt-root",        type=str, default="./ckpt")
-    parser.add_argument("-cn",   "--ckpt-name",        type=str, default=None)
+    parser.add_argument("-cn",   "--ckpt-name",        type=str, required=True)
 
-    parser.add_argument("-ntr",  "--num-train",        type=int, default=None)
     parser.add_argument("-nts",  "--num-test",         type=int, default=None)
-    parser.add_argument("-nb",   "--num-batch",        type=int, default=128)
-    parser.add_argument("-ni",   "--num-inducing",     type=int, default=200)
-    parser.add_argument("-ntrs", "--num-train-sample", type=int, default=100)
     parser.add_argument("-ntss", "--num-test-sample",  type=int, default=10000)
-
-    parser.add_argument("-a",    "--alpha",            type=float, default=2.)
-    parser.add_argument("-b",    "--beta",             type=float, default=2.)
 
     parser.add_argument("-nh",   "--num-hiddens",      type=int, default=4)
     parser.add_argument("-act",  "--activation",       choices=["erf", "relu"], default="relu")
-    parser.add_argument("-ws",   "--w-std",            type=float, default=1.)
-    parser.add_argument("-bs",   "--b-std",            type=float, default=1e-8)
-    parser.add_argument("-ls",   "--last-w-std",       type=float, default=1.)
-
-    parser.add_argument("-opt",  "--optimizer",        choices=["adam", "sgd"], default="adam")
-    parser.add_argument("-lr",   "--learning-rate",    type=float, default=1e-3)
-    parser.add_argument("-t",    "--steps",            type=int, default=50000)
-    parser.add_argument("-km",   "--kmeans",           default=False, action="store_true")
 
     parser.add_argument("-s",    "--seed",             type=int, default=10)
-    parser.add_argument("-pi",   "--print-interval",   type=int, default=100)
-    parser.add_argument("-ti",   "--test-interval",    type=int, default=500)
     parser.add_argument("-q",    "--quite",            default=False, action="store_true")
-
-
-def get_inducing_points(X, Y, num_inducing, num_classes):
-    inducings = []
-    inducing_per_class = num_inducing // num_classes
-    for class_idx in range(num_classes):
-        xc = X[jnp.argmax(Y, axis=1) == class_idx]
-        xc = xc.reshape(xc.shape[0], -1)
-        kmeans = KMeans(n_clusters=inducing_per_class).fit(xc).cluster_centers_
-        inducings.append(kmeans.reshape(kmeans.shape[0], *X.shape[1:]))
-    return jnp.vstack(inducings)
 
 
 def get_act_class(act):
@@ -148,15 +119,6 @@ def get_resnet_kernel(
     return kernel_fn
 
 
-def build_train_batch(model, optimizer, learning_rate, num_batch, num_train, num_samples, jit=True):
-    grad_loss = objax.GradValues(model.loss, model.vars())
-    def train_batch(key, x_batch, y_batch):
-        g, v = grad_loss(key, x_batch, y_batch, num_batch, num_train, num_samples)
-        optimizer(learning_rate, g)
-        return v[0]
-    return objax.Jit(train_batch, grad_loss.vars() + optimizer.vars()) if jit else train_batch
-
-
 def build_test_batch(model, num_batch, num_samples, jit=True):
     def test_batch(key, x_batch, y_batch):
         nll, correct_count = model.test_acc_nll(key, x_batch, y_batch, num_batch, num_samples)
@@ -181,7 +143,7 @@ def main(args):
         args.ckpt_name += f"/{str(datetime.now().strftime('%y%m%d%H%M'))}"
 
     ckpt_dir = os.path.join(os.path.expanduser(args.ckpt_root), args.ckpt_name)
-    checkpointer = Checkpointer(ckpt_dir, keep_ckpts=10)
+    checkpointer = Checkpointer(ckpt_dir, keep_ckpts=3)
     logger = Logger(ckpt_dir, quite=args.quite)
 
     # Dataset
@@ -270,17 +232,13 @@ def main(args):
     logger.log("Args:")
     logger.log("  method          : ", args.method)
     logger.log("  network         : ", args.network)
-    logger.log("  data-name       : ", args.data_name)
-    logger.log("  test-data-name  : ", args.test_data_name)
+    logger.log("  data-name       : ", args.test_data_name)
     logger.log("  data-root       : ", args.data_root)
     logger.log("  ckpt-root       : ", args.ckpt_root)
     logger.log("  ckpt-name       : ", args.ckpt_name)
-    logger.log("  num-train       : ", num_train)
     logger.log("  num-test        : ", num_test)
-    logger.log("  num-batch       : ", args.num_batch)
     logger.log("  num-inducing    : ", args.num_inducing)
-    logger.log("  num-train-sample: ", args.num_train_sample)
-    logger.log("  num-test-sample : ", args.num_test_sample)
+    logger.log("  num-sample      : ", args.num_test_sample)
     logger.log("  alpha           : ", args.alpha)
     logger.log("  beta            : ", args.beta)
     logger.log("  num-hiddens     : ", args.num_hiddens)
