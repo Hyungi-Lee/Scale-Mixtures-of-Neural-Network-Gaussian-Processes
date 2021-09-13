@@ -97,7 +97,7 @@ class SVSP(Module):
         test_sigma = matmul3(A_L, q_sigma, A_L.T) + cov
 
         sampled_f = self.prior.sample_f(key, mean, test_sigma, num_samples)
-        sampled_f = sampled_f.reshape(num_samples, self.num_latent_gps, num_batch)
+        sampled_f = sampled_f.reshape(num_samples, self.num_latent_gps, -1)#num_batch)
         sampled_f = jnp.transpose(sampled_f, axes=(0, 2, 1))
 
         nll = -test_log_likelihood(y_batch, sampled_f, num_samples)

@@ -11,17 +11,22 @@ __all__ = [
 
 image_datasets = [
     "mnist",
-    "mnist_corrupted/shot_noise",
-    "mnist_corrupted/impulse_noise",
-    "mnist_corrupted/spatter",
-    "mnist_corrupted/glass_blur",
-    "mnist_corrupted/zigzag",
     "fashion_mnist",
     "emnist",
     "kmnist",
     "cifar10",
     "cifar100",
     "svhn_cropped",
+    "mnist_corrupted/shot_noise",
+    "mnist_corrupted/impulse_noise",
+    "mnist_corrupted/spatter",
+    "mnist_corrupted/glass_blur",
+    "mnist_corrupted/zigzag",
+    "cifar10_corrupted/brightness_5",
+    "cifar10_corrupted/fog_5",
+    "cifar10_corrupted/defocus_blur_5",
+    "cifar10_corrupted/frosted_glass_blur_5",
+    "cifar10_corrupted/gaussian_noise_5",
 ]
 
 feature_datasets = [
@@ -135,7 +140,7 @@ def get_test_dataset(
 
     elif name in image_datasets:
         ds_builder = tfds.builder(name)
-        ds_train, ds_test = tfds.as_numpy(
+        ds_test, = tfds.as_numpy(
             tfds.load(name, data_dir=root, split=["test"],
                       batch_size=-1, as_dataset_kwargs=dict(shuffle_files=False))
         )

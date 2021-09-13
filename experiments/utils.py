@@ -1,6 +1,6 @@
-from typing import Optional
 import os
 import glob
+import math
 
 from tqdm import tqdm
 
@@ -114,13 +114,15 @@ class Checkpointer:
         for ckpt in sorted(glob.glob(os.path.join(self.logdir, self.FILE_MATCH)))[:-self.keep_ckpts]:
             os.remove(ckpt)
 
-    def step(self, idx, loss, vc):
+    def step(self, idx, loss: float, vc):
         updated, stop = False, False
 
         if loss < self.best_losses[0]:
             self.save(idx, vc)
             updated = True
         elif loss > self.best_losses[-1] and len(self.best_losses) == self.patience:
+            stop = True
+        elif math.isnan(loss):
             stop = True
 
         self.best_losses = sorted(self.best_losses + [loss])[:self.patience]

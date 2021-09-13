@@ -11,6 +11,9 @@ from jax import numpy as jnp
 import objax
 from objax.optimizer import SGD, Adam
 
+# from jax import jit
+# import neural_tangents as nt
+
 from spax.models import SVSP
 from spax.kernels import NNGPKernel
 from spax.priors import GaussianPrior, InverseGammaPrior
@@ -116,10 +119,10 @@ def main(args):
         if args.kmeans:
             args.ckpt_name += "-km"
         args.ckpt_name += f"-s{args.seed}"
-        args.ckpt_name += f"/{str(datetime.now().strftime('%y%m%d%H'))}"
+        args.ckpt_name += f"/{str(datetime.now().strftime('%y%m%d%H%M'))}"
 
     ckpt_dir = os.path.join(os.path.expanduser(args.ckpt_root), args.ckpt_name)
-    checkpointer = Checkpointer(ckpt_dir, patience=2)
+    checkpointer = Checkpointer(ckpt_dir, patience=15)
     logger = Logger(ckpt_dir, quite=args.quite)
 
     try:
@@ -152,10 +155,12 @@ def main(args):
             raise ValueError(f"Unsupported dataset '{dataset}'")
 
         def get_kernel_fn(w_std, b_std, last_w_std):
-            return base_kernel_fn(
+            kernel_fn = base_kernel_fn(
                 args.num_hiddens, num_class, args.activation,
                 w_std=w_std, b_std=b_std, last_w_std=last_w_std,
             )
+            # kernel_fn = jit(nt.batch(kernel_fn, batch_size=8), static_argnums=2)
+            return kernel_fn
 
         kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, args.last_w_std)
 
