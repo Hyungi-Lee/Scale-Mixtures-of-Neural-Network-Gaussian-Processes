@@ -11,8 +11,8 @@ from jax import numpy as jnp
 import objax
 from objax.optimizer import SGD, Adam
 
-# from jax import jit
-# import neural_tangents as nt
+from jax import jit
+import neural_tangents as nt
 
 from spax.models import SVSP
 from spax.kernels import NNGPKernel
@@ -20,7 +20,7 @@ from spax.priors import GaussianPrior, InverseGammaPrior
 
 from .data import get_train_dataset, datasets
 from ..nt_kernels import get_mlp_kernel, get_cnn_kernel, get_resnet_kernel
-from ..utils import TrainBatch, TestBatch, Checkpointer, Logger, get_context_summary
+from ..utils import TrainBatch, TestBatch, Checkpointer, Logger, ReduceLROnPlateau, get_context_summary
 
 
 def add_subparser(subparsers):
@@ -51,8 +51,11 @@ def add_subparser(subparsers):
     parser.add_argument("-ls",  "--last-w-std",       type=float, default=1.)
 
     parser.add_argument("-opt", "--optimizer",        choices=["adam", "sgd"], default="adam")
-    parser.add_argument("-lr",  "--learning-rate",    type=float, default=1e-3)
-    # parser.add_argument("-t",   "--steps",            type=int, default=50000)
+    parser.add_argument("-lr",  "--lr",               type=float, default=1e-2)
+    parser.add_argument("-lrd", "--lr-decay",         type=float, default=0.5)
+    parser.add_argument("-lrt", "--lr-threshold",     type=float, default=1e-4)
+    parser.add_argument("-lrp", "--lr-patience",      type=int, default=5)
+    parser.add_argument("-t",   "--max-steps",        type=int, default=100000)
     parser.add_argument("-km",  "--kmeans",           default=False, action="store_true")
 
     parser.add_argument("-s",   "--seed",             type=int, default=10)
@@ -77,18 +80,18 @@ def get_inducing_points(X, Y, num_inducing, num_class):
     return jnp.vstack(inducings)
 
 
-def build_train_step(model, optimizer, learning_rate, num_batch, num_train, num_samples, jit=True):
+def build_train_step(model, optimizer, num_train, num_samples, jit=True):
     grad_loss = objax.GradValues(model.loss, model.vars())
-    def train_step(key, x_batch, y_batch):
-        g, v = grad_loss(key, x_batch, y_batch, num_batch, num_train, num_samples)
+    def train_step(key, x_batch, y_batch, learning_rate):
+        g, v = grad_loss(key, x_batch, y_batch, num_train, num_samples)
         optimizer(learning_rate, g)
         return v[0]
     return objax.Jit(train_step, grad_loss.vars() + optimizer.vars()) if jit else train_step
 
 
-def build_valid_step(model, num_batch, num_samples, jit=True):
+def build_valid_step(model, num_samples, jit=True):
     def valid_step(key, x_batch, y_batch):
-        nll, correct_count = model.test_acc_nll(key, x_batch, y_batch, num_batch, num_samples)
+        nll, correct_count = model.test_acc_nll(key, x_batch, y_batch, num_samples)
         return nll, correct_count
     return objax.Jit(valid_step, model.vars()) if jit else valid_step
 
@@ -113,7 +116,8 @@ def main(args):
     if not args.ckpt_name:
         args.ckpt_name = f"{args.data_name}"
         args.ckpt_name += f"/{args.method}"
-        args.ckpt_name += f"/ni{args.num_inducing}-nh{args.num_hiddens}-ws{args.w_std:.1f}-bs{args.b_std:.1f}-ls{args.last_w_std:.1f}"
+        # args.ckpt_name += f"/ni{args.num_inducing}-nh{args.num_hiddens}-ws{args.w_std:.1f}-bs{args.b_std:.1f}-ls{args.last_w_std:.1f}"
+        args.ckpt_name += f"/ni{args.num_inducing}-nh{args.num_hiddens}"
         if args.method == "svtp":
             args.ckpt_name += f"-a{args.alpha:.1f}-b{args.beta:.1f}"
         if args.kmeans:
@@ -130,7 +134,7 @@ def main(args):
         dataset = get_train_dataset(
             name=args.data_name, root=args.data_root,
             num_data=args.num_data, valid_prop=args.valid_prop,
-            normalize=True, one_hot=True, seed=args.seed,
+            normalize=True, seed=args.seed,
         )
         x_train, y_train, x_valid, y_valid, dataset_info = dataset
 
@@ -159,7 +163,8 @@ def main(args):
                 args.num_hiddens, num_class, args.activation,
                 w_std=w_std, b_std=b_std, last_w_std=last_w_std,
             )
-            # kernel_fn = jit(nt.batch(kernel_fn, batch_size=8), static_argnums=2)
+            # kernel_fn = jit(nt.batch(kernel_fn, batch_size=2), static_argnums=2)
+            # kernel_fn = nt.batch(kernel_fn, batch_size=2)
             return kernel_fn
 
         kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, args.last_w_std)
@@ -187,11 +192,13 @@ def main(args):
         else:
             raise ValueError(f"Unsupported optimizer '{args.optimizer}'")
 
+        scheduler = ReduceLROnPlateau(lr=args.lr, factor=args.lr_decay, patience=args.lr_patience)
+
         # Build functions
         num_valid_batch = 100
 
-        train_step = build_train_step(model, optimizer, args.learning_rate, args.num_batch, num_train, args.num_sample)
-        valid_step = build_valid_step(model, num_valid_batch, args.num_valid_sample)
+        train_step = build_train_step(model, optimizer, num_train, args.num_sample)
+        valid_step = build_valid_step(model, args.num_valid_sample)
 
         train_batches = TrainBatch(x_train, y_train, args.num_batch, args.seed)
         valid_batches = TestBatch(x_valid, y_valid, num_valid_batch)
@@ -214,7 +221,7 @@ def main(args):
 
         for i, (x_batch, y_batch) in tqdm(enumerate(train_batches, start=1), desc="Train", ncols=0):
             key, split_key = random.split(key)
-            n_elbo = train_step(split_key, x_batch, y_batch)
+            n_elbo = train_step(split_key, x_batch, y_batch, scheduler.lr)
 
             if i % args.print_interval == 0:
                 ws, bs, ls = model.kernel.get_params()
@@ -230,15 +237,21 @@ def main(args):
             if i % args.valid_interval == 0:
                 valid_nll, valid_acc = validate(key, valid_batches, valid_step, num_valid)
                 logger.log(f"[{i:5d}] NLL: {valid_nll:.5f}  ACC: {valid_acc:.4f}", is_tqdm=True)
-                updated, stop = checkpointer.step(i, valid_nll, save_vc)
+                reduced = scheduler.step(valid_nll)
+                updated, _ = checkpointer.step(i, valid_nll, save_vc)
 
                 if updated:
-                    logger.log(f"[{i:5d}] Updated: NLL: {valid_nll:.5f}  ACC: {valid_acc:.4f}", is_tqdm=True)
+                    logger.log(f"[{i:5d}] Updated  NLL: {valid_nll:.5f}  ACC: {valid_acc:.4f}", is_tqdm=True)
                     best_step, best_model_acc, best_model_nll = i, valid_acc, valid_nll
                     best_print_str = print_str
 
-                if stop:
-                    break
+                if reduced:
+                    logger.log(f"LR reduced to {scheduler.lr:.6f}", is_tqdm=True)
+                    if scheduler.lr < args.lr_threshold:
+                        break
+
+            if i == args.max_steps:
+                break
 
         logger.log(f"\n[{best_step:5d}] NLL: {best_model_nll:.5f}  ACC: {best_model_acc:.4f}  {best_print_str}\n")
 

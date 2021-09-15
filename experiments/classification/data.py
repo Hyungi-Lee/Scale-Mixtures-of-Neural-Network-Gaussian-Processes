@@ -22,6 +22,7 @@ image_datasets = [
     "mnist_corrupted/spatter",
     "mnist_corrupted/glass_blur",
     "mnist_corrupted/zigzag",
+    "cifar10_corrupted/spatter_5",
     "cifar10_corrupted/brightness_5",
     "cifar10_corrupted/fog_5",
     "cifar10_corrupted/defocus_blur_5",
@@ -42,17 +43,12 @@ def permute_dataset(x, y, seed=0):
     return permuted_x, permuted_y
 
 
-def _one_hot(x, k):
-  return np.array(x[:, None] == np.arange(k), np.float32)
-
-
 def get_train_dataset(
     name,
     root="./data",
     num_data=None,
     valid_prop=0.1,
     normalize=True,
-    one_hot=True,
     seed=0,
 ):
     meta = {}
@@ -87,9 +83,6 @@ def get_train_dataset(
     num_class = ds_builder.info.features["label"].num_classes
     meta["num_class"] = num_class
 
-    if one_hot:
-        y_train = _one_hot(y_train, num_class)
-
     x_train, y_train = permute_dataset(x_train, y_train, seed=seed)
     if num_data is None:
         num_data = x_train.shape[0]
@@ -119,7 +112,6 @@ def get_test_dataset(
     num_test=None,
     normalize=True,
     dataset_stat=None,
-    one_hot=True,
 ):
     meta = {}
 
@@ -152,9 +144,6 @@ def get_test_dataset(
 
     num_class = ds_builder.info.features["label"].num_classes
     meta["num_class"] = num_class
-
-    if one_hot:
-        y_test = _one_hot(y_test, num_class)
 
     if num_test:
         x_test, y_test = x_test[:num_test], y_test[:num_test]

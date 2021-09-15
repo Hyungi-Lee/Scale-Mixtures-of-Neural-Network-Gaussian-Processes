@@ -1,18 +1,16 @@
 import numpy as np
 
 from jax import numpy as jnp
-# from jax.nn import log_softmax, logsumexp
+from jax.nn import log_softmax, logsumexp
 
 
 __all__ = [
     "matmul3",
     "jitter",
-    "kron_diag",
     "split_kernel",
     "get_true_values",
-    "logsumexp",
-    "log_softmax",
     "logdet",
+    "trace",
     "log_likelihood",
     "test_log_likelihood",
     "get_correct_count",
@@ -28,11 +26,6 @@ def jitter(num):
     return 1e-6 * np.eye(num)
 
 
-def kron_diag(data, n):
-    data_expanded = jnp.kron(np.eye(n), data)
-    return data_expanded
-
-
 def split_kernel(kernel, num_11):
     kernel_11 = kernel[:num_11, :num_11]
     kernel_12 = kernel[:num_11, num_11:]
@@ -41,66 +34,46 @@ def split_kernel(kernel, num_11):
     return kernel_11, kernel_12, kernel_21, kernel_22
 
 
+def logdet(data):
+    sign, abslogdet = jnp.linalg.slogdet(data)
+    return jnp.sum(sign * abslogdet)
+
+
+def trace(data):
+    return jnp.sum(jnp.trace(data, axis1=-2, axis2=-1))
+
+
 def get_true_values(value, label):
-    """
-    Parameters
-    ----------
-    value: [sample_num, batch_num, class_num]
-    label: [batch_num, class_num]
-
-    Returns
-    -------
-    true_values: [sample_num, batch_num]
-    """
-
-    sample_num = value.shape[0]
-    label_idx = jnp.argmax(label, axis=-1)[jnp.newaxis, :, jnp.newaxis]
-    value_idx = jnp.repeat(label_idx, sample_num, axis=0)
-    true_values = jnp.take_along_axis(value, value_idx, axis=-1).squeeze(axis=-1)
+    label = label[jnp.newaxis, :, jnp.newaxis]
+    value_idx = jnp.repeat(label, value.shape[2], axis=2)
+    true_values = jnp.take_along_axis(value, value_idx, axis=0).squeeze(axis=0)
     return true_values
 
 
-def logsumexp(data, axis=-1):
-    data_max = jnp.max(data, axis=axis, keepdims=True)
-    data_exp = jnp.exp(data - data_max)
-    data_sum = jnp.log(jnp.sum(data_exp, axis=axis, keepdims=True))
-    data_logsumexp = data_sum + data_max
-    return data_logsumexp
-
-
-def log_softmax(data):
-    return data - logsumexp(data)
-
-
-def logdet(data):
-    sign, abslogdet = jnp.linalg.slogdet(data)
-    return sign * abslogdet
-
-
-def log_likelihood(label, sampled_f):
-    sampled_f_softmax = log_softmax(sampled_f)
+def log_likelihood(sampled_f, label):
+    sampled_f_softmax = log_softmax(sampled_f, axis=0)
     true_label_softmax = get_true_values(sampled_f_softmax, label)
-    ll = jnp.mean(jnp.mean(true_label_softmax, axis=1))
+    ll = jnp.mean(jnp.mean(true_label_softmax, axis=0))
     return ll
 
 
-def test_log_likelihood(label, sampled_f, sample_num):
-    sampled_f_softmax = log_softmax(sampled_f)
-    true_label_softmax = get_true_values(sampled_f_softmax, label)
-    ll = jnp.sum(logsumexp(true_label_softmax.T) - np.log(sample_num))
+def test_log_likelihood(sampled_f, label):
+    num_samples = sampled_f.shape[2]
+    sampled_f_softmax = log_softmax(sampled_f, axis=0)  # [C, B, S]
+    true_label_softmax = get_true_values(sampled_f_softmax, label)  # [B, S]
+    ll = jnp.sum(logsumexp(true_label_softmax, axis=1) - np.log(num_samples))
     return ll
 
 
-def get_correct_count(label, sampled_f):
-    sampled_f_softmax = jnp.exp(log_softmax(sampled_f))
-    mean_f_softmax = jnp.mean(sampled_f_softmax, axis=0)
-    predict_y = jnp.argmax(mean_f_softmax, axis=-1)
-    true_y = jnp.argmax(label, axis=-1)
-    correct_count = jnp.sum(predict_y == true_y)
+def get_correct_count(sampled_f, label):
+    sampled_f_softmax = log_softmax(sampled_f, axis=0)  # [C, B, S]
+    sum_f_softmax = logsumexp(sampled_f_softmax, axis=2)  # [C, B]
+    y_pred = jnp.argmax(sum_f_softmax, axis=0)  # [B]
+    correct_count = jnp.sum(y_pred == label)
     return correct_count
 
 
-# multivariate_t implementation from jax.random.multivariate_normal
+# multivariate_t implementation fork from jax.random.multivariate_normal
 
 from typing import Any, Sequence, Optional
 from functools import partial

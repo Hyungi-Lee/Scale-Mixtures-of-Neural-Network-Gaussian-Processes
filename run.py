@@ -8,13 +8,13 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 # Only for environment preparation
 parser = argparse.ArgumentParser(add_help=False)
-parser.add_argument("-g", "--gpu", type=int)
+parser.add_argument("-g", "--gpu", type=int, nargs="*")
 parser.add_argument("-f", "--fraction", type=float)
 args, main_args = parser.parse_known_args()
 
 # Set up environment
 if args.gpu is not None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in args.gpu)
 
 if args.fraction is not None:
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(args.fraction)
