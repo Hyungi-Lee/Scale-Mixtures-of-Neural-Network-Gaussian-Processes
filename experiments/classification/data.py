@@ -12,11 +12,12 @@ __all__ = [
 image_datasets = [
     "mnist",
     "fashion_mnist",
-    "emnist",
     "kmnist",
     "cifar10",
     "cifar100",
     "svhn_cropped",
+    "emnist",
+    "emnist/letters",
     "mnist_corrupted/shot_noise",
     "mnist_corrupted/impulse_noise",
     "mnist_corrupted/spatter",

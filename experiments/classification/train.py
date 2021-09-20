@@ -55,7 +55,7 @@ def add_subparser(subparsers):
     parser.add_argument("-lrd", "--lr-decay",         type=float, default=0.5)
     parser.add_argument("-lrt", "--lr-threshold",     type=float, default=1e-4)
     parser.add_argument("-lrp", "--lr-patience",      type=int, default=5)
-    parser.add_argument("-t",   "--max-steps",        type=int, default=100000)
+    parser.add_argument("-t",   "--max-steps",        type=int, default=30000)
     parser.add_argument("-km",  "--kmeans",           default=False, action="store_true")
 
     parser.add_argument("-s",   "--seed",             type=int, default=10)
@@ -119,10 +119,10 @@ def main(args):
         # args.ckpt_name += f"/ni{args.num_inducing}-nh{args.num_hiddens}-ws{args.w_std:.1f}-bs{args.b_std:.1f}-ls{args.last_w_std:.1f}"
         args.ckpt_name += f"/ni{args.num_inducing}-nh{args.num_hiddens}"
         if args.method == "svtp":
-            args.ckpt_name += f"-a{args.alpha:.1f}-b{args.beta:.1f}"
+            args.ckpt_name += f"-a{args.alpha:.0f}-b{args.beta:.0f}"
         if args.kmeans:
             args.ckpt_name += "-km"
-        args.ckpt_name += f"-s{args.seed}"
+        # args.ckpt_name += f"-s{args.seed}"
         args.ckpt_name += f"/{str(datetime.now().strftime('%y%m%d%H%M'))}"
 
     ckpt_dir = os.path.join(os.path.expanduser(args.ckpt_root), args.ckpt_name)
