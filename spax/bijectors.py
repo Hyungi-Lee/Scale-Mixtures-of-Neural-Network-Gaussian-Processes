@@ -2,6 +2,7 @@ from typing import Optional, Callable
 
 import abc
 
+import jax
 from jax import nn
 from jax import numpy as jnp
 
@@ -50,7 +51,7 @@ class Exp(PositiveBijector):
 
 class Softplus(PositiveBijector):
     base = lambda _, x: nn.softplus(x)
-    base_inv = lambda _, x: jnp.log(jnp.expm1(x))
+    base_inv = lambda _, x: jnp.where(x < 20., jnp.log(jnp.expm1(x)), x)
 
 
 def positive(lower: Optional[float] = None, base: Optional[str] = None) -> PositiveBijector:

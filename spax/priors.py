@@ -49,6 +49,7 @@ class InverseGammaPrior(Prior):
     def sample_f(self, key, mean, cov, num_samples):
         df = 2 * self.a.safe_value
         num_class = mean.shape[0]
+        cov = cov * self.b.safe_value / self.a.safe_value
         sampled_f = multivariate_t(key, df, mean, cov, shape=(num_samples, num_class))
         sampled_f = sampled_f.transpose(1, 2, 0)
         return sampled_f
