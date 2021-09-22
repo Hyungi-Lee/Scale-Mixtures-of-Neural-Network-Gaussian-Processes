@@ -1,13 +1,17 @@
 import numpy as np
 from jax import numpy as jnp
+from jax.scipy import stats
 
 from .base import Module, TrainVar, ConstraintTrainVar
 from .bijectors import positive
 from .utils import jitter, log_likelihood, test_log_likelihood, get_correct_count
 
+from .utils import multivariate_t  # TODO: Remove this
+
 
 __all__ = [
     "SVSP",
+    "SPR",
 ]
 
 
@@ -73,6 +77,7 @@ class SVSP(Module):
         correct_count = get_correct_count(sampled_f, y_batch)
         return nll, correct_count
 
+    # TODO: Remove this
     def test_acc_nll2(self, key, x_batch, y_batch, num_samples, alphas, betas):
         inducing_variable = self.inducing_variable.value  # [I, D...]
         q_mu = self.q_mu.value  # [C, I]
@@ -89,8 +94,8 @@ class SVSP(Module):
 
         test_cov = jnp.einsum("ij,cjk,kl->cil", A_L, q_sigma, A_L.T) + cov[None, :, :]  # [C, B, B]
 
-        nlls = [] #np.empty((len(alphas), len(betas)))
-        ccs = []  #np.empty((len(alphas), len(betas)))
+        nlls = []
+        ccs = []
         for a in alphas:
             for b in betas:
                 sampled_f = multivariate_t(key, 2 * a, mean.T, test_cov * b / a, shape=(num_samples, self.num_latent_gps))
@@ -101,10 +106,36 @@ class SVSP(Module):
                 nlls.append(nll)
                 ccs.append(correct_count)
 
-        # nlls = np.array(nlls).reshape((len(alphas), len(betas)))
-        # ccs = np.array(ccs).reshape((len(alphas), len(betas)))
-
         return nlls, ccs
 
 
-from .utils import multivariate_t
+class SPR(Module):
+    def __init__(self, kernel, likelihood, x_data, y_data):
+        super().__init__()
+        self.kernel = kernel
+        self.likelihood = likelihood
+        self.x_data = x_data
+        self.y_data = y_data
+        self.num_data = x_data.shape[0]
+
+    def loss(self):
+        kernel_fn = self.kernel.get_kernel_fn()
+        cov = self.kernel.K(kernel_fn, self.x_data) + jitter(self.num_data)
+        log_prob = self.likelihood.prior_logpdf(self.y_data, cov)
+        return -log_prob / self.num_data
+
+    def test_nll(self, x, y):
+        kernel_fn = self.kernel.get_kernel_fn()
+        mean, cov = self.kernel.predict(kernel_fn, self.x_data, self.y_data[:, None], x)
+        require = self.likelihood.require
+        if require:
+            if "cov_data" in require:
+                cov_data = self.kernel.K(kernel_fn, self.x_data)
+            aux_dict = dict(cov_data=cov_data, y_data=self.y_data, num_data=self.num_data)
+            aux = tuple(aux_dict[k] for k in require)
+        else:
+            aux = None
+
+        log_prob = self.likelihood.logpdf(y, mean.flatten(), cov, aux)
+        ll = jnp.mean(log_prob)
+        return -ll

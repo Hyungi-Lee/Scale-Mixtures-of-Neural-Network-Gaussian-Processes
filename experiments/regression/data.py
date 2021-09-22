@@ -13,6 +13,7 @@ from sklearn.datasets import load_boston
 __all__ = [
     "datasets",
     "get_dataset",
+    "permute_dataset",
     "split_dataset",
 ]
 
@@ -286,3 +287,9 @@ def split_dataset(x, y, train, valid, test, normalize_x=True, normalize_y=True):
         y_test = (y_test - y_mean) / y_std
 
     return x_train, y_train, x_valid, y_valid, x_test, y_test
+
+
+def permute_dataset(x, y, seed=0):
+    idx = np.random.RandomState(seed).permutation(x.shape[0])
+    permuted_x, permuted_y = x[idx], y[idx]
+    return permuted_x, permuted_y

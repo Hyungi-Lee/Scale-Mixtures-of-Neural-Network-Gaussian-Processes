@@ -15,6 +15,7 @@ __all__ = [
     "test_log_likelihood",
     "get_correct_count",
     "multivariate_t",
+    "multivariate_t_logpdf",
 ]
 
 
@@ -137,3 +138,46 @@ def _multivariate_t(key, df, mean, cov, shape, dtype, method) -> jnp.ndarray:
     factor = cholesky(cov)
   t_samples = t(key, df, shape + mean.shape[-1:], dtype)
   return mean + jnp.einsum('...ij,...j->...i', factor, t_samples)
+
+
+
+# multivariate_t.log_pdf implementation fork from jax.scipy.stats.multivariate_normal.logpdf
+
+import numpy as np
+import scipy.stats as osp_stats
+
+from jax import lax
+from jax import numpy as jnp
+from jax._src.numpy.util import _wraps
+from jax._src.numpy.lax_numpy import _promote_dtypes_inexact
+from jax._src.scipy.stats import multivariate_normal, t as student_t
+from jax._src.scipy.special import gammaln
+
+
+# @_wraps(osp_stats.multivariate_t.logpdf, update_doc=False, lax_description="""
+# In the JAX version, the `allow_singular` argument is not implemented.
+# """)
+def multivariate_t_logpdf(x, loc, shape, df, allow_singular=None):
+  if allow_singular is not None:
+    raise NotImplementedError("allow_singular argument of multivariate_t.logpdf")
+  # TODO: Properly handle df == np.inf
+  # if df == np.inf:
+  #   return multivariate_normal.logpdf(x, loc, shape)
+  x, loc, shape, df = _promote_dtypes_inexact(x, loc, shape, df)
+  if not loc.shape:
+    return student_t.logpdf(x, df, loc=loc, scale=jnp.sqrt(shape))
+  else:
+    n = loc.shape[-1]
+    if not np.shape(shape):
+      y = x - loc
+      # TODO: Implement this
+      raise NotImplementedError("multivariate_t.logpdf doesn't support scalar shape")
+    else:
+      if shape.ndim < 2 or shape.shape[-2:] != (n, n):
+        raise ValueError("multivariate_t.logpdf got incompatible shapes")
+      t = 1/2 * (df + n)
+      L = lax.linalg.cholesky(shape)
+      y = lax.linalg.triangular_solve(L, x - loc, lower=True, transpose_a=True)
+      return (-t * jnp.log(1 + 1/df * jnp.einsum('...i,...i->...', y, y))
+              - n/2*jnp.log(df*np.pi) + gammaln(t) - gammaln(1/2 * df)
+              - jnp.log(L.diagonal(axis1=-1, axis2=-2)).sum(-1))

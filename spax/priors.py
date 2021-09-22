@@ -7,6 +7,13 @@ from .bijectors import positive
 from .utils import logdet, trace, multivariate_t
 
 
+__all__ = [
+    "Prior",
+    "GaussianPrior",
+    "InverseGammaPrior",
+]
+
+
 class Prior(Module):
     pass
 
