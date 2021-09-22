@@ -8,7 +8,6 @@ from jax import random
 from jax import numpy as jnp
 
 import objax
-from objax.optimizer import SGD, Adam
 
 from spax.models import SVSP
 from spax.kernels import NNGPKernel
@@ -43,9 +42,9 @@ def add_subparser(subparsers):
     parser.add_argument("-q",   "--quite",       default=False, action="store_true")
 
 
-def build_test_step(model, num_batch, num_samples, jit=True):
+def build_test_step(model, num_samples, jit=True):
     def test_step(key, x_batch, y_batch):
-        nll, correct_count = model.test_acc_nll(key, x_batch, y_batch, num_batch, num_samples)
+        nll, correct_count = model.test_acc_nll(key, x_batch, y_batch, num_samples)
         return nll, correct_count
     return objax.Jit(test_step, model.vars()) if jit else test_step
 
@@ -106,6 +105,12 @@ def main(args):
         args.alpha = context_info["args"]["alpha"]
         args.beta = context_info["args"]["beta"]
 
+    # args.method = "svtp"
+    # a = jnp.array(3.)
+    # args.alpha = a
+    # b = jnp.array(100.)
+    # args.beta = b
+
     class TempLogger:
         def log(self, *args, **kwargs):
             print(*args)
@@ -118,11 +123,14 @@ def main(args):
     x_test, y_test, dataset_info = get_test_dataset(
         name=args.data_name, root=args.data_root,
         num_test=args.num_test, normalize=True,
-        dataset_stat=dataset_stat, one_hot=True,
+        dataset_stat=dataset_stat,
     )
 
     num_class = dataset_info["num_class"]
     num_test = x_test.shape[0]
+
+    q_mu = q_mu.reshape(num_class, -1)
+    q_sqrt = q_sqrt.reshape(num_class, -1)
 
     # Kernel
     if dataset_info["type"] == "image":
@@ -161,12 +169,12 @@ def main(args):
         model.prior.a.assign(a)
         model.prior.b.assign(b)
 
-    # print(model.vars(), end="\n\n")
+    print(model.vars(), end="\n\n")
 
     # Build functions
     num_test_batch = 100
 
-    test_step = build_test_step(model, num_test_batch, args.num_sample)
+    test_step = build_test_step(model, args.num_sample)
     test_batches = TestBatch(x_test, y_test, num_test_batch)
 
     # Train

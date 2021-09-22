@@ -11,6 +11,7 @@ __all__ = [
 
 image_datasets = [
     "mnist",
+    "mnist_imbalanced",
     "fashion_mnist",
     "kmnist",
     "cifar10",
@@ -29,6 +30,7 @@ image_datasets = [
     "cifar10_corrupted/defocus_blur_5",
     "cifar10_corrupted/frosted_glass_blur_5",
     "cifar10_corrupted/gaussian_noise_5",
+    "cifar10_imbalanced",
 ]
 
 feature_datasets = [
@@ -44,6 +46,19 @@ def permute_dataset(x, y, seed=0):
     return permuted_x, permuted_y
 
 
+def get_num_class_data(num_data_per_class, num_class, mode="exp", factor=1):
+    if mode == "exp":
+        d = np.exp(np.arange(num_class) * factor)
+    elif mode == "step":
+        d = np.arange(0, num_class) + 1 / factor
+    else:
+        raise ValueError("Unknown mode")
+
+    d = d / np.max(d) * num_data_per_class
+    d = np.round(d).astype(int).tolist()
+    return d
+
+
 def get_train_dataset(
     name,
     root="./data",
@@ -53,6 +68,12 @@ def get_train_dataset(
     seed=0,
 ):
     meta = {}
+
+    if name.endswith("_imbalanced"):
+        imbalanced = True
+        name = name[:-11]
+    else:
+        imbalanced = False
 
     if name in feature_datasets:
         ds_builder = tfds.builder(name)
@@ -88,21 +109,48 @@ def get_train_dataset(
     if num_data is None:
         num_data = x_train.shape[0]
 
+    if imbalanced:
+        data_class = []
+        for class_idx in range(num_class):
+            idxs = [y_train == class_idx]
+            data_class.append((x_train[idxs], y_train[idxs]))
+        min_num_data_per_class = min(map(lambda v: len(v[0]), data_class))
+        num_train_per_class = int(min_num_data_per_class * (1 - valid_prop))
+        num_valid_per_class = min_num_data_per_class - num_train_per_class
+        num_class_data = get_num_class_data(min_num_data_per_class, num_class, mode="exp", factor=.5)
+        num_valid = num_class * num_valid_per_class
+        num_train = sum(num_class_data)
+        assert num_valid > 0, "num_valid must be > 0"
+
+        x_valid = np.concatenate([x[-num_valid_per_class:] for (x, _) in data_class])
+        y_valid = np.concatenate([y[-num_valid_per_class:] for (_, y) in data_class])
+        x_train = np.concatenate([x[:num_train] for num_train, (x, _) in zip(num_class_data, data_class)])
+        y_train = np.concatenate([y[:num_train] for num_train, (_, y) in zip(num_class_data, data_class)])
+        x_train, y_train = permute_dataset(x_train, y_train, seed=seed)
+
+    else:
+        num_valid = int(num_data * valid_prop)
+        num_train = num_data - num_valid
+        assert num_valid > 0, "num_valid must be > 0"
+
+        x_train, y_train = x_train[:num_train], y_train[:num_train]
+        x_valid, y_valid = x_train[-num_valid:], y_train[-num_valid:]
+
     if normalize:
         edim = list(range(x_train.ndim - 1))
-        x_mean = np.expand_dims(np.mean(x_train.reshape(-1, x_train.shape[-1]), axis=0), axis=edim)
-        x_std  = np.expand_dims(np.std(x_train.reshape(-1, x_train.shape[-1]),  axis=0), axis=edim)
+        if "cifar" in name:
+            x_mean = np.expand_dims(np.array((0.4914, 0.4822, 0.4465)) * 255., axis=edim)
+            x_std  = np.expand_dims(np.array((0.2023, 0.1994, 0.2010)) * 255., axis=edim)
+        else:
+            x_data = np.concatenate((x_train, x_valid), axis=0)
+            x_mean = np.expand_dims(np.mean(x_data.reshape(-1, x_data.shape[-1]), axis=0), axis=edim)
+            x_std  = np.expand_dims(np.std(x_data.reshape(-1, x_data.shape[-1]),  axis=0), axis=edim)
         x_train = (x_train - x_mean) / x_std
+        x_valid = (x_valid - x_mean) / x_std
         meta["stat"] = dict(x_mean=x_mean, x_std=x_std)
     else:
         x_train = np.array(x_train).astype(float)
-
-    num_valid = int(num_data * valid_prop)
-    num_train = num_data - num_valid
-    assert num_valid > 0, "num_valid must be > 0"
-
-    x_train, y_train = x_train[:num_train], y_train[:num_train]
-    x_valid, y_valid = x_train[-num_valid:], y_train[-num_valid:]
+        x_valid = np.array(x_valid).astype(float)
 
     return x_train, y_train, x_valid, y_valid, meta
 
@@ -115,6 +163,9 @@ def get_test_dataset(
     dataset_stat=None,
 ):
     meta = {}
+
+    if name.endswith("_imbalanced"):
+        raise KeyError("Test dataset doesn't support imbalanced dataset")
 
     if name in feature_datasets:
         ds_builder = tfds.builder(name)

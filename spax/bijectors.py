@@ -2,7 +2,6 @@ from typing import Optional, Callable
 
 import abc
 
-import jax
 from jax import nn
 from jax import numpy as jnp
 

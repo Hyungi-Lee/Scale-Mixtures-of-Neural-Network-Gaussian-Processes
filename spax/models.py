@@ -72,3 +72,39 @@ class SVSP(Module):
         nll = -test_log_likelihood(sampled_f, y_batch)
         correct_count = get_correct_count(sampled_f, y_batch)
         return nll, correct_count
+
+    def test_acc_nll2(self, key, x_batch, y_batch, num_samples, alphas, betas):
+        inducing_variable = self.inducing_variable.value  # [I, D...]
+        q_mu = self.q_mu.value  # [C, I]
+        q_sqrt = self.q_sqrt.safe_value  # [C, I]
+        q_sigma = jnp.einsum("ci,ij->cij", q_sqrt, np.eye(self.num_inducing))  # [C, I, I]
+        kernel_fn = self.kernel.get_kernel_fn()
+
+        k_bi = self.kernel.K(kernel_fn, x_batch, inducing_variable)  # [B, I]
+        k_ii = self.kernel.K(kernel_fn, inducing_variable)  # [I, I]
+        k_ii_inv = jnp.linalg.inv(k_ii + jitter(self.num_inducing))  # [I, I]
+
+        mean, cov = self.kernel.predict(kernel_fn, inducing_variable, q_mu.T, x_batch)  # [B, C], [B, B]
+        A_L = jnp.matmul(k_bi, k_ii_inv)  # [B, I]
+
+        test_cov = jnp.einsum("ij,cjk,kl->cil", A_L, q_sigma, A_L.T) + cov[None, :, :]  # [C, B, B]
+
+        nlls = [] #np.empty((len(alphas), len(betas)))
+        ccs = []  #np.empty((len(alphas), len(betas)))
+        for a in alphas:
+            for b in betas:
+                sampled_f = multivariate_t(key, 2 * a, mean.T, test_cov * b / a, shape=(num_samples, self.num_latent_gps))
+                sampled_f = sampled_f.transpose(1, 2, 0)
+
+                nll = -test_log_likelihood(sampled_f, y_batch)
+                correct_count = get_correct_count(sampled_f, y_batch)
+                nlls.append(nll)
+                ccs.append(correct_count)
+
+        # nlls = np.array(nlls).reshape((len(alphas), len(betas)))
+        # ccs = np.array(ccs).reshape((len(alphas), len(betas)))
+
+        return nlls, ccs
+
+
+from .utils import multivariate_t

@@ -4,11 +4,13 @@ from datetime import datetime
 import numpy as np
 from tqdm import tqdm
 from sklearn.cluster import KMeans
+import pandas as pd
 
 from jax import random
 from jax import numpy as jnp
 
 import objax
+from objax import VarCollection
 from objax.optimizer import SGD, Adam
 
 from spax.models import SVSP
@@ -21,7 +23,7 @@ from ..utils import TrainBatch, TestBatch, Checkpointer, Logger, ReduceLROnPlate
 
 
 def add_subparser(subparsers):
-    parser = subparsers.add_parser("train", aliases=["tr"])
+    parser = subparsers.add_parser("train1", aliases=["tr1"])
     parser.set_defaults(func=main)
 
     parser.add_argument("-m",   "--method",           choices=["svgp", "svtp"], required=True)
@@ -40,6 +42,8 @@ def add_subparser(subparsers):
 
     parser.add_argument("-a",   "--alpha",            type=float, default=2.)
     parser.add_argument("-b",   "--beta",             type=float, default=2.)
+    parser.add_argument("-al",  "--alphas",           type=str, default="[.5]")
+    parser.add_argument("-bl",  "--betas",            type=str, default="[.5]")
 
     parser.add_argument("-nh",  "--num-hiddens",      type=int, default=4)
     parser.add_argument("-act", "--activation",       choices=["erf", "relu"], default="relu")
@@ -48,10 +52,8 @@ def add_subparser(subparsers):
     parser.add_argument("-ls",  "--last-w-std",       type=float, default=1.)
 
     parser.add_argument("-opt", "--optimizer",        choices=["adam", "sgd"], default="adam")
-    parser.add_argument("-lr",  "--lr",               type=float, default=1e-2)
-    parser.add_argument("-lrd", "--lr-decay",         type=float, default=0.5)
-    parser.add_argument("-lrt", "--lr-threshold",     type=float, default=1e-4)
-    parser.add_argument("-lrp", "--lr-patience",      type=int, default=5)
+    parser.add_argument("-lr1", "--lr1",              type=float, default=1e-2)
+    parser.add_argument("-lr2", "--lr2",              type=float, default=1e-2)
     parser.add_argument("-t",   "--max-steps",        type=int, default=30000)
     parser.add_argument("-km",  "--kmeans",           default=False, action="store_true")
 
@@ -60,6 +62,10 @@ def add_subparser(subparsers):
     parser.add_argument("-vi",  "--valid-interval",   type=int, default=500)
     parser.add_argument("-q",   "--quite",            default=False, action="store_true")
     parser.add_argument("-c",   "--comment",          type=str, default="")
+
+
+def indent(string, n=8):
+    return "\n".join(map(lambda s: " " * n + s, str(string).split("\n")))
 
 
 def get_inducing_points(X, Y, num_inducing, num_class):
@@ -73,13 +79,14 @@ def get_inducing_points(X, Y, num_inducing, num_class):
     return jnp.vstack(inducings)
 
 
-def build_train_step(model, optimizer, num_train, num_samples, jit=True):
+def build_train_step(model, opt1, opt2, opt1_idxs, opt2_idxs, num_train, num_samples, jit=True):
     grad_loss = objax.GradValues(model.loss, model.vars())
-    def train_step(key, x_batch, y_batch, learning_rate):
+    def train_step(key, x_batch, y_batch, lr1, lr2):
         g, v = grad_loss(key, x_batch, y_batch, num_train, num_samples)
-        optimizer(learning_rate, g)
+        opt1(lr1, [v for i, v in enumerate(g) if i in opt1_idxs])
+        opt2(lr2, [v for i, v in enumerate(g) if i in opt2_idxs])
         return v[0]
-    return objax.Jit(train_step, grad_loss.vars() + optimizer.vars()) if jit else train_step
+    return objax.Jit(train_step, grad_loss.vars() + opt1.vars("opt1") + opt2.vars("opt2")) if jit else train_step
 
 
 def build_valid_step(model, num_samples, jit=True):
@@ -104,12 +111,35 @@ def validate(key, valid_batches, valid_step, num_valid):
     return valid_nll, valid_acc
 
 
+def build_valid_step2(model, num_samples, alphas, betas, jit=True):
+    def valid_step(key, x_batch, y_batch):
+        nlls, ccs = model.test_acc_nll2(key, x_batch, y_batch, num_samples, alphas, betas)
+        return nlls, ccs
+    return objax.Jit(valid_step, model.vars()) if jit else valid_step
+
+
+def validate2(key, valid_batches, valid_step, num_valid, alphas, betas):
+    valid_nll_list = []
+    total_corrects = np.zeros((len(alphas), len(betas)))
+
+    for x_batch, y_batch in tqdm(valid_batches, desc="Valid", leave=False, ncols=0):
+        key, split_key = random.split(key)
+        nlls, ccs = valid_step(split_key, x_batch, y_batch)
+        nlls = np.array(nlls).reshape(len(alphas), len(betas))
+        ccs = np.array(ccs).reshape(len(alphas), len(betas))
+        valid_nll_list.append(nlls)
+        total_corrects += ccs
+
+    valid_nll = (jnp.sum(jnp.array(valid_nll_list), axis=0) / num_valid)
+    valid_acc = (total_corrects / num_valid)
+    return valid_nll, valid_acc
+
+
 def main(args):
     # Log
     if not args.ckpt_name:
         args.ckpt_name = f"{args.data_name}"
         args.ckpt_name += f"/{args.method}"
-        # args.ckpt_name += f"/ni{args.num_inducing}-nh{args.num_hiddens}-ws{args.w_std:.1f}-bs{args.b_std:.1f}-ls{args.last_w_std:.1f}"
         args.ckpt_name += f"/ni{args.num_inducing}-nh{args.num_hiddens}"
         if args.method == "svtp":
             args.ckpt_name += f"-a{args.alpha:.1f}-b{args.beta:.1f}"
@@ -125,6 +155,9 @@ def main(args):
     checkpointer = Checkpointer(ckpt_dir, patience=15)
     logger = Logger(ckpt_dir, quite=args.quite)
 
+    alphas = eval(args.alphas)
+    betas = eval(args.betas)
+
     try:
         # Dataset
         dataset = get_train_dataset(
@@ -137,9 +170,6 @@ def main(args):
         num_class = dataset_info["num_class"]
         num_train = x_train.shape[0]
         num_valid = x_valid.shape[0]
-
-        # for class_idx in range(num_class):
-        #     print(f"{class_idx}: {sum(y_train == class_idx)}")
 
         # Kernel
         if dataset_info["type"] == "image":
@@ -170,20 +200,7 @@ def main(args):
         if args.kmeans:
             inducing_points = get_inducing_points(x_train, y_train, args.num_inducing, num_class)
         else:
-            if not args.data_name.endswith("imbalanced"):
-                inducing_points = x_train[:args.num_inducing]
-            else:
-                # 2
-                # num_inducing_per_class = args.num_inducing // num_class
-                # inducing_points = np.concatenate([x_train[y_train == class_idx][:num_inducing_per_class] for class_idx in range(num_class)], axis=0)
-                # 3
-                l = np.array([sum(y_train == class_idx) for class_idx in range(num_class)])
-                num_inducing_class = np.round(args.num_inducing * l / sum(l)).astype(int).tolist()
-                inducing_points = np.concatenate([x_train[y_train == class_idx][:ni] for class_idx, ni in zip(range(num_class), num_inducing_class)], axis=0)
-                args.num_inducing = inducing_points.shape[0]
-                print(num_inducing_class)
-                print(args.num_inducing)
-                print("balanced inducing ratio")
+            inducing_points = x_train[:args.num_inducing]
 
         if args.method == "svgp":
             prior = GaussianPrior()
@@ -195,25 +212,30 @@ def main(args):
         model = SVSP(prior, kernel, inducing_points, num_latent_gps=num_class)
 
         # Optimizer
+        idx1 = [i for i, k in enumerate(model.vars().keys()) if "prior" not in k]
+        idx2 = [i for i, k in enumerate(model.vars().keys()) if "prior" in k]
+        vars1 = VarCollection({k: v for k, v in model.vars().items() if "prior" not in k})
+        vars2 = VarCollection({k: v for k, v in model.vars().items() if "prior" in k})
         if args.optimizer == "adam":
-            optimizer = Adam(model.vars())
+            opt1 = Adam(vars1)
+            opt2 = Adam(vars2)
         elif args.optimizer == "sgd":
-            optimizer = SGD(model.vars())
+            opt1 = SGD(vars1)
+            opt2 = SGD(vars2)
         else:
             raise ValueError(f"Unsupported optimizer '{args.optimizer}'")
-
-        scheduler = ReduceLROnPlateau(lr=args.lr, factor=args.lr_decay, patience=args.lr_patience)
 
         # Build functions
         num_valid_batch = 100
 
-        train_step = build_train_step(model, optimizer, num_train, args.num_sample)
+        train_step = build_train_step(model, opt1, opt2, idx1, idx2, num_train, args.num_sample)
         valid_step = build_valid_step(model, args.num_valid_sample)
+        valid_step2 = build_valid_step2(model, args.num_valid_sample, alphas, betas)
 
         train_batches = TrainBatch(x_train, y_train, args.num_batch, args.seed)
         valid_batches = TestBatch(x_valid, y_valid, num_valid_batch)
 
-        save_vc = model.vars() + optimizer.vars()
+        save_vc = model.vars() + opt1.vars("opt1") + opt2.vars("opt2")
 
         # Log
         np.save(os.path.join(ckpt_dir, "meta.npy"), dict(dataset=dataset_info, args=vars(args)))
@@ -223,15 +245,19 @@ def main(args):
         key = random.PRNGKey(args.seed)
 
         valid_nll, valid_acc = validate(key, valid_batches, valid_step, num_valid)
-        logger.log(f"[{0:5d}] NLL: {valid_nll:.5f}  ACC: {valid_acc:.4f}")
+        logger.log(f"[{0:5d}] NLL: {valid_nll:.5f}  ACC: {valid_acc*100:.2f}")
+        valid_nll, valid_acc = validate2(key, valid_batches, valid_step2, num_valid, alphas, betas)
+        print(indent(pd.DataFrame(valid_nll, index=alphas, columns=betas)))
+        with pd.option_context("display.float_format", "{:.2f}".format):
+            print(indent(pd.DataFrame(valid_acc * 100, index=alphas, columns=betas)))
 
         best_model_nll, best_model_acc = valid_nll, valid_acc
         best_step = 0
         best_print_str = ""
 
-        for i, (x_batch, y_batch) in tqdm(enumerate(train_batches, start=1), desc="Train", ncols=0):
+        for i, (x_batch, y_batch) in tqdm(enumerate(train_batches, start=1), total=args.max_steps, desc="Train", ncols=0):
             key, split_key = random.split(key)
-            n_elbo = train_step(split_key, x_batch, y_batch, scheduler.lr)
+            n_elbo = train_step(split_key, x_batch, y_batch, args.lr1, args.lr2)
 
             if i % args.print_interval == 0:
                 ws, bs, ls = model.kernel.get_params()
@@ -247,18 +273,17 @@ def main(args):
             if i % args.valid_interval == 0:
                 valid_nll, valid_acc = validate(key, valid_batches, valid_step, num_valid)
                 logger.log(f"[{i:5d}] NLL: {valid_nll:.5f}  ACC: {valid_acc:.4f}", is_tqdm=True)
-                reduced = scheduler.step(valid_nll)
                 updated, _ = checkpointer.step(i, valid_nll, save_vc)
 
                 if updated:
-                    logger.log(f"[{i:5d}] Updated  NLL: {valid_nll:.5f}  ACC: {valid_acc:.4f}", is_tqdm=True)
+                    logger.log(f"[{i:5d}] Updated  NLL: {valid_nll:.5f}  ACC: {valid_acc*100:.2f}", is_tqdm=True)
                     best_step, best_model_acc, best_model_nll = i, valid_acc, valid_nll
                     best_print_str = print_str
 
-                if reduced:
-                    logger.log(f"LR reduced to {scheduler.lr:.6f}", is_tqdm=True)
-                    if scheduler.lr < args.lr_threshold:
-                        break
+                valid_nll, valid_acc = validate2(key, valid_batches, valid_step2, num_valid, alphas, betas)
+                logger.log(indent(pd.DataFrame(valid_nll, index=alphas, columns=betas)), is_tqdm=True)
+                with pd.option_context("display.float_format", "{:.2f}".format):
+                    logger.log(indent(pd.DataFrame(valid_acc * 100, index=alphas, columns=betas)), is_tqdm=True)
 
             if i == args.max_steps:
                 break
