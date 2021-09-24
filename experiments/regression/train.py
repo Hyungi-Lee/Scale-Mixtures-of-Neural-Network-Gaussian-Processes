@@ -31,10 +31,6 @@ def add_subparser(subparsers):
 
     parser.add_argument("-vp",  "--valid-prop",       type=float, default=0.1)
     parser.add_argument("-nd",  "--num-data",         type=int, default=None)
-    parser.add_argument("-nb",  "--num-batch",        type=int, default=128)
-    parser.add_argument("-ni",  "--num-inducing",     type=int, default=200)
-    parser.add_argument("-ns",  "--num-sample",       type=int, default=100)
-    parser.add_argument("-nvs", "--num-valid-sample", type=int, default=1000)
 
     parser.add_argument("-a",   "--alpha",            type=float, default=2.)
     parser.add_argument("-b",   "--beta",             type=float, default=2.)
@@ -44,6 +40,7 @@ def add_subparser(subparsers):
     parser.add_argument("-ws",  "--w-std",            type=float, default=1.)
     parser.add_argument("-bs",  "--b-std",            type=float, default=1e-8)
     parser.add_argument("-ls",  "--last-w-std",       type=float, default=1.)
+    parser.add_argument("-diag","--diag-reg",         type=float, default=1e-6)
 
     parser.add_argument("-opt", "--optimizer",        choices=["adam", "sgd"], default="adam")
     parser.add_argument("-lr",  "--lr",               type=float, default=1e-2)
@@ -89,8 +86,7 @@ def main(args):
     if not args.ckpt_name:
         args.ckpt_name = f"{args.data_name}"
         args.ckpt_name += f"/{args.method}"
-        # args.ckpt_name += f"/ni{args.num_inducing}-nh{args.num_hiddens}-ws{args.w_std:.1f}-bs{args.b_std:.1f}-ls{args.last_w_std:.1f}"
-        args.ckpt_name += f"/ni{args.num_inducing}-nh{args.num_hiddens}"
+        args.ckpt_name += f"/nh{args.num_hiddens}-ws{args.w_std:.1f}-bs{args.b_std:.1f}-ls{args.last_w_std:.1f}"
         if args.method == "tp":
             args.ckpt_name += f"-a{args.alpha:.1f}-b{args.beta:.1f}"
         # args.ckpt_name += f"-s{args.seed}"
@@ -138,10 +134,10 @@ def main(args):
             return kernel_fn
 
         if args.method == "gp":
-            kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, args.last_w_std)
+            kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, args.last_w_std, diag_reg=args.diag_reg)
 
         elif args.method == "tp":
-            kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, 1., const_last_w_std=True)
+            kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, 1., const_last_w_std=True, diag_reg=args.diag_reg)
 
         # Likelihood
         if args.method == "gp":
@@ -178,7 +174,7 @@ def main(args):
         test_nll = test_step()
         logger.log(f"[{0:5d}] NLL: {valid_nll:.5f}  TEST: {test_nll:.5f}")
 
-        best_nll = valid_nll
+        best_nll, best_test_nll = valid_nll, test_nll
         best_step = 0
         best_print_str = ""
 
@@ -205,7 +201,7 @@ def main(args):
 
                 if updated:
                     logger.log(f"[{i:5d}] Updated  NLL: {valid_nll:.5f}", is_tqdm=True)
-                    best_step, best_nll = i, valid_nll
+                    best_step, best_nll, best_test_nll = i, valid_nll, test_nll
                     best_print_str = print_str
 
                 if reduced:
@@ -216,10 +212,7 @@ def main(args):
                 if math.isnan(valid_nll):
                     break
 
-            # if i == args.max_steps:
-            #     break
-
-        logger.log(f"\n[{best_step:5d}] NLL: {best_nll:.5f}  {best_print_str}\n")
+        logger.log(f"\n[{best_step:5d}] TEST: {best_test_nll:.5f}  NLL: {best_nll:.5f}  {best_print_str}\n")
 
 
     except KeyboardInterrupt:

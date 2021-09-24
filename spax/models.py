@@ -1,12 +1,11 @@
 import numpy as np
 from jax import numpy as jnp
-from jax.scipy import stats
 
 from .base import Module, TrainVar, ConstraintTrainVar
 from .bijectors import positive
 from .utils import jitter, log_likelihood, test_log_likelihood, get_correct_count
 
-from .utils import multivariate_t  # TODO: Remove this
+from jax import random  # TODO: Remove this
 
 
 __all__ = [
@@ -29,7 +28,56 @@ class SVSP(Module):
             constraint=positive(),
         )
 
-    def loss(self, key, x_batch, y_batch, num_train, num_samples):
+    def loss(self, key, x_batch, y_batch, num_train, num_samples, aux=False):
+        inducing_variable = self.inducing_variable.value  # [I, D...]
+        q_mu = self.q_mu.value  # [C, I]
+        q_sqrt = self.q_sqrt.safe_value  # [C, I]
+        q_sigma = jnp.einsum("ci,ij->cij", q_sqrt, np.eye(self.num_inducing))  # [C, I, I]
+        kernel_fn = self.kernel.get_kernel_fn()
+
+        k_bi = self.kernel.K(kernel_fn, x_batch, inducing_variable)  # [B, I]
+        k_ii = self.kernel.K(kernel_fn, inducing_variable)  # [I, I]
+        k_ii_inv = jnp.linalg.inv(k_ii + jitter(self.num_inducing))  # [I, I]
+
+        zero = np.zeros((self.num_inducing, self.num_latent_gps))  # [I, C]
+        _, B_B = self.kernel.predict(kernel_fn, inducing_variable, zero, x_batch)  # [B, B]
+        A_B = jnp.matmul(k_bi, k_ii_inv)  # [B, I]
+
+        mean = jnp.matmul(q_mu, A_B.T)  # [C, B]
+        cov = jnp.einsum("ij,cjk,kl->cil", A_B, q_sigma, A_B.T) + B_B[None, :, :]  # [C, B, B]
+        sampled_f = self.prior.sample_f(key, mean, cov, num_samples)  # [C, B, S]
+
+        ll = log_likelihood(sampled_f, y_batch)
+        kl = self.prior.kl_divergence(k_ii, k_ii_inv, q_mu, q_sigma, self.num_inducing, self.num_latent_gps)
+        n_elbo = -ll + kl / num_train
+        if aux:
+            return n_elbo, -ll, kl / num_train
+        else:
+            return n_elbo
+
+    def test_acc_nll(self, key, x_batch, y_batch, num_samples):
+        inducing_variable = self.inducing_variable.value  # [I, D...]
+        q_mu = self.q_mu.value  # [C, I]
+        q_sqrt = self.q_sqrt.safe_value  # [C, I]
+        q_sigma = jnp.einsum("ci,ij->cij", q_sqrt, np.eye(self.num_inducing))  # [C, I, I]
+        kernel_fn = self.kernel.get_kernel_fn()
+
+        k_bi = self.kernel.K(kernel_fn, x_batch, inducing_variable)  # [B, I]
+        k_ii = self.kernel.K(kernel_fn, inducing_variable)  # [I, I]
+        k_ii_inv = jnp.linalg.inv(k_ii + jitter(self.num_inducing))  # [I, I]
+
+        mean, cov = self.kernel.predict(kernel_fn, inducing_variable, q_mu.T, x_batch)  # [B, C], [B, B]
+        A_B = jnp.matmul(k_bi, k_ii_inv)  # [B, I]
+
+        test_cov = jnp.einsum("ij,cjk,kl->cil", A_B, q_sigma, A_B.T) + cov[None, :, :]  # [C, B, B]
+        sampled_f = self.prior.sample_f_iid(key, mean.T, test_cov, num_samples)  # [C, B, S]
+
+        nll = -test_log_likelihood(sampled_f, y_batch)
+        correct_count = get_correct_count(sampled_f, y_batch)
+        return nll, correct_count
+
+    # TODO: Remove this
+    def loss2(self, key, x_batch, y_batch, num_train, num_samples, alphas, betas):
         inducing_variable = self.inducing_variable.value  # [I, D...]
         q_mu = self.q_mu.value  # [C, I]
         q_sqrt = self.q_sqrt.safe_value  # [C, I]
@@ -46,36 +94,18 @@ class SVSP(Module):
 
         mean = jnp.matmul(q_mu, A_B.T)  # [C, B]
         cov = jnp.einsum("ij,cjk,kl->cil", A_B, q_sigma, A_B.T) + B_B[None, :, :]  # [C, B, B]
-        cov_L = jnp.linalg.cholesky(cov)  # [C, B, B]
 
-        sampled_f_b = self.prior.sample_f_b(key, self.num_latent_gps, x_batch.shape[0], num_samples)  # [C, B, S]
-        sampled_f = mean[:, :, None] + jnp.matmul(cov_L, sampled_f_b)  # [C, B, S]
+        nelbos = []
+        for a in alphas:
+            for b in betas:
+                sampled_f = self.prior.sample_f2(key, mean, cov, num_samples, a, b)  # [C, B, S]
 
-        ll = log_likelihood(sampled_f, y_batch)
-        kl = self.prior.kl_divergence(k_ii, k_ii_inv, q_mu, q_sigma, self.num_inducing, self.num_latent_gps)
-        n_elbo = -ll + kl / num_train
-        return n_elbo
+                ll = log_likelihood(sampled_f, y_batch)
+                kl = self.prior.kl_divergence2(k_ii, k_ii_inv, q_mu, q_sigma, self.num_inducing, self.num_latent_gps, a, b)
+                n_elbo = -ll + kl / num_train
+                nelbos.append(n_elbo)
 
-    def test_acc_nll(self, key, x_batch, y_batch, num_samples):
-        inducing_variable = self.inducing_variable.value  # [I, D...]
-        q_mu = self.q_mu.value  # [C, I]
-        q_sqrt = self.q_sqrt.safe_value  # [C, I]
-        q_sigma = jnp.einsum("ci,ij->cij", q_sqrt, np.eye(self.num_inducing))  # [C, I, I]
-        kernel_fn = self.kernel.get_kernel_fn()
-
-        k_bi = self.kernel.K(kernel_fn, x_batch, inducing_variable)  # [B, I]
-        k_ii = self.kernel.K(kernel_fn, inducing_variable)  # [I, I]
-        k_ii_inv = jnp.linalg.inv(k_ii + jitter(self.num_inducing))  # [I, I]
-
-        mean, cov = self.kernel.predict(kernel_fn, inducing_variable, q_mu.T, x_batch)  # [B, C], [B, B]
-        A_L = jnp.matmul(k_bi, k_ii_inv)  # [B, I]
-
-        test_cov = jnp.einsum("ij,cjk,kl->cil", A_L, q_sigma, A_L.T) + cov[None, :, :]  # [C, B, B]
-        sampled_f = self.prior.sample_f(key, mean.T, test_cov, num_samples)  # [C, B, S]
-
-        nll = -test_log_likelihood(sampled_f, y_batch)
-        correct_count = get_correct_count(sampled_f, y_batch)
-        return nll, correct_count
+        return nelbos
 
     # TODO: Remove this
     def test_acc_nll2(self, key, x_batch, y_batch, num_samples, alphas, betas):
@@ -96,10 +126,12 @@ class SVSP(Module):
 
         nlls = []
         ccs = []
+        num_class, num_batch = mean.T.shape
         for a in alphas:
             for b in betas:
-                sampled_f = multivariate_t(key, 2 * a, mean.T, test_cov * b / a, shape=(num_samples, self.num_latent_gps))
-                sampled_f = sampled_f.transpose(1, 2, 0)
+                sigma = jnp.sqrt(jnp.diagonal(b / a * test_cov, axis1=-2, axis2=-1))
+                sampled_f = random.t(key, 2 * a, shape=(num_class, num_batch, num_samples))
+                sampled_f = sampled_f * sigma[..., None] + mean.T[..., None]
 
                 nll = -test_log_likelihood(sampled_f, y_batch)
                 correct_count = get_correct_count(sampled_f, y_batch)

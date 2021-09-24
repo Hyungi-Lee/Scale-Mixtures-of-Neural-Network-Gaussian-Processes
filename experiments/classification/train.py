@@ -164,7 +164,10 @@ def main(args):
             )
             return kernel_fn
 
-        kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, args.last_w_std)
+        if args.method == "svgp":
+            kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, args.last_w_std)
+        elif args.method == "svtp":
+            kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, 1., const_last_w_std=True)
 
         # Model
         if args.kmeans:
@@ -229,9 +232,16 @@ def main(args):
         best_step = 0
         best_print_str = ""
 
+        elbo_check = objax.Jit(lambda key, x_batch, y_batch: model.loss(key, x_batch, y_batch, num_train, args.num_sample, aux=True), model.vars())
+
         for i, (x_batch, y_batch) in tqdm(enumerate(train_batches, start=1), desc="Train", ncols=0):
             key, split_key = random.split(key)
             n_elbo = train_step(split_key, x_batch, y_batch, scheduler.lr)
+
+            if i % 100 == 0:
+                nelbo, ll, kl = elbo_check(key, x_batch, y_batch)
+                nelbo, ll, kl = float(nelbo), float(ll), float(kl)
+                logger.log(f"[{i:5d}] {nelbo = :.4f}, {ll = :.4f}, {kl = :.4f}", is_tqdm=True)
 
             if i % args.print_interval == 0:
                 ws, bs, ls = model.kernel.get_params()

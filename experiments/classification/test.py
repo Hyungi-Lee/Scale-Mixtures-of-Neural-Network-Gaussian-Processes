@@ -108,8 +108,10 @@ def main(args):
     # args.method = "svtp"
     # a = jnp.array(3.)
     # args.alpha = a
-    # b = jnp.array(100.)
+    # b = jnp.array(.01)
     # args.beta = b
+
+    # print(a.item(), b.item())
 
     class TempLogger:
         def log(self, *args, **kwargs):

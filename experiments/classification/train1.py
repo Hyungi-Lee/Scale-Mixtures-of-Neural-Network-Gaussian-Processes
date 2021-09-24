@@ -54,6 +54,9 @@ def add_subparser(subparsers):
     parser.add_argument("-opt", "--optimizer",        choices=["adam", "sgd"], default="adam")
     parser.add_argument("-lr1", "--lr1",              type=float, default=1e-2)
     parser.add_argument("-lr2", "--lr2",              type=float, default=1e-2)
+    parser.add_argument("-lrd", "--lr-decay",         type=float, default=0.5)
+    parser.add_argument("-lrt", "--lr-threshold",     type=float, default=1e-4)
+    parser.add_argument("-lrp", "--lr-patience",      type=int, default=5)
     parser.add_argument("-t",   "--max-steps",        type=int, default=30000)
     parser.add_argument("-km",  "--kmeans",           default=False, action="store_true")
 
@@ -87,6 +90,13 @@ def build_train_step(model, opt1, opt2, opt1_idxs, opt2_idxs, num_train, num_sam
         opt2(lr2, [v for i, v in enumerate(g) if i in opt2_idxs])
         return v[0]
     return objax.Jit(train_step, grad_loss.vars() + opt1.vars("opt1") + opt2.vars("opt2")) if jit else train_step
+
+
+def build_train_step2(model, num_train, num_samples, alphas, betas, jit=True):
+    def train_step(key, x_batch, y_batch):
+        v = model.loss2(key, x_batch, y_batch, num_train, num_samples, alphas, betas)
+        return v
+    return objax.Jit(train_step, model.vars()) if jit else train_step
 
 
 def build_valid_step(model, num_samples, jit=True):
@@ -225,15 +235,19 @@ def main(args):
         else:
             raise ValueError(f"Unsupported optimizer '{args.optimizer}'")
 
+        scheduler = ReduceLROnPlateau(lr=args.lr1, factor=args.lr_decay, patience=args.lr_patience)
+
         # Build functions
         num_valid_batch = 100
 
         train_step = build_train_step(model, opt1, opt2, idx1, idx2, num_train, args.num_sample)
+        train_step2 = build_train_step2(model, num_train, args.num_sample, alphas, betas)
         valid_step = build_valid_step(model, args.num_valid_sample)
         valid_step2 = build_valid_step2(model, args.num_valid_sample, alphas, betas)
 
         train_batches = TrainBatch(x_train, y_train, args.num_batch, args.seed)
         valid_batches = TestBatch(x_valid, y_valid, num_valid_batch)
+        valid_train_batches = TestBatch(x_train, y_train, num_valid_batch)
 
         save_vc = model.vars() + opt1.vars("opt1") + opt2.vars("opt2")
 
@@ -244,12 +258,16 @@ def main(args):
         # Train
         key = random.PRNGKey(args.seed)
 
-        valid_nll, valid_acc = validate(key, valid_batches, valid_step, num_valid)
-        logger.log(f"[{0:5d}] NLL: {valid_nll:.5f}  ACC: {valid_acc*100:.2f}")
+        # train_nll, train_acc = validate2(key, valid_train_batches, valid_step2, num_train, alphas, betas)
         valid_nll, valid_acc = validate2(key, valid_batches, valid_step2, num_valid, alphas, betas)
-        print(indent(pd.DataFrame(valid_nll, index=alphas, columns=betas)))
+        # logger.log(f"[{0:5d}] Train " + "=" * 40)
+        # logger.log(indent(pd.DataFrame(train_nll, index=alphas, columns=betas)))
+        # with pd.option_context("display.float_format", "{:.2f}".format):
+        #     logger.log(indent(pd.DataFrame(train_acc * 100, index=alphas, columns=betas)))
+        logger.log(f"[{0:5d}] Valid " + "=" * 40)
+        logger.log(indent(pd.DataFrame(valid_nll, index=alphas, columns=betas)))
         with pd.option_context("display.float_format", "{:.2f}".format):
-            print(indent(pd.DataFrame(valid_acc * 100, index=alphas, columns=betas)))
+            logger.log(indent(pd.DataFrame(valid_acc * 100, index=alphas, columns=betas)))
 
         best_model_nll, best_model_acc = valid_nll, valid_acc
         best_step = 0
@@ -257,7 +275,7 @@ def main(args):
 
         for i, (x_batch, y_batch) in tqdm(enumerate(train_batches, start=1), total=args.max_steps, desc="Train", ncols=0):
             key, split_key = random.split(key)
-            n_elbo = train_step(split_key, x_batch, y_batch, args.lr1, args.lr2)
+            n_elbo = train_step(split_key, x_batch, y_batch, scheduler.lr, args.lr2)
 
             if i % args.print_interval == 0:
                 ws, bs, ls = model.kernel.get_params()
@@ -273,6 +291,7 @@ def main(args):
             if i % args.valid_interval == 0:
                 valid_nll, valid_acc = validate(key, valid_batches, valid_step, num_valid)
                 logger.log(f"[{i:5d}] NLL: {valid_nll:.5f}  ACC: {valid_acc:.4f}", is_tqdm=True)
+                reduced = scheduler.step(valid_nll)
                 updated, _ = checkpointer.step(i, valid_nll, save_vc)
 
                 if updated:
@@ -280,7 +299,20 @@ def main(args):
                     best_step, best_model_acc, best_model_nll = i, valid_acc, valid_nll
                     best_print_str = print_str
 
+                if reduced:
+                    logger.log(f"LR reduced to {scheduler.lr:.6f}", is_tqdm=True)
+                    if scheduler.lr < args.lr_threshold:
+                        break
+
+                # train_nll, train_acc = validate2(key, valid_train_batches, valid_step2, num_train, alphas, betas)
+                nelbos = np.array(train_step2(split_key, x_batch, y_batch)).reshape(len(alphas), len(betas))
                 valid_nll, valid_acc = validate2(key, valid_batches, valid_step2, num_valid, alphas, betas)
+                logger.log(f"[{i:5d}] Train " + "=" * 40, is_tqdm=True)
+                # logger.log(indent(pd.DataFrame(train_nll, index=alphas, columns=betas)), is_tqdm=True)
+                # with pd.option_context("display.float_format", "{:.2f}".format):
+                    # logger.log(indent(pd.DataFrame(train_acc * 100, index=alphas, columns=betas)), is_tqdm=True)
+                logger.log(indent(pd.DataFrame(nelbos, index=alphas, columns=betas)), is_tqdm=True)
+                logger.log(f"[{i:5d}] Valid " + "=" * 40, is_tqdm=True)
                 logger.log(indent(pd.DataFrame(valid_nll, index=alphas, columns=betas)), is_tqdm=True)
                 with pd.option_context("display.float_format", "{:.2f}".format):
                     logger.log(indent(pd.DataFrame(valid_acc * 100, index=alphas, columns=betas)), is_tqdm=True)
