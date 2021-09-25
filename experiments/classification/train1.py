@@ -6,6 +6,7 @@ from tqdm import tqdm
 from sklearn.cluster import KMeans
 import pandas as pd
 
+import jax
 from jax import random
 from jax import numpy as jnp
 
@@ -65,6 +66,8 @@ def add_subparser(subparsers):
     parser.add_argument("-vi",  "--valid-interval",   type=int, default=500)
     parser.add_argument("-q",   "--quite",            default=False, action="store_true")
     parser.add_argument("-c",   "--comment",          type=str, default="")
+
+    parser.add_argument("-r",   "--resize",           type=int, default=1)
 
 
 def indent(string, n=8):
@@ -181,6 +184,13 @@ def main(args):
         num_train = x_train.shape[0]
         num_valid = x_valid.shape[0]
 
+        h, w, c = x_train.shape[1:]
+
+        if args.resize > 1:
+            x_train = jax.image.resize(x_train, (num_train, h // args.resize, w // args.resize, c), method="bilinear")
+            x_valid = jax.image.resize(x_valid, (num_valid, h // args.resize, w // args.resize, c), method="bilinear")
+            print(f"Resized to ({h}, {w}, {c}) -> ({', '.join(x_train.shape[1:])})")
+
         # Kernel
         if dataset_info["type"] == "image":
             assert args.network is None or args.network in ["cnn", "resnet"], "Only CNN and ResNet are supported for image dataset"
@@ -204,7 +214,10 @@ def main(args):
             )
             return kernel_fn
 
-        kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, args.last_w_std)
+        if args.method == "svgp":
+            kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, args.last_w_std)
+        elif args.method == "svtp":
+            kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, 1., const_last_w_std=True)
 
         # Model
         if args.kmeans:
@@ -247,9 +260,11 @@ def main(args):
 
         train_batches = TrainBatch(x_train, y_train, args.num_batch, args.seed)
         valid_batches = TestBatch(x_valid, y_valid, num_valid_batch)
-        valid_train_batches = TestBatch(x_train, y_train, num_valid_batch)
 
         save_vc = model.vars() + opt1.vars("opt1") + opt2.vars("opt2")
+
+        # TODO: Remove this
+        elbo_check = objax.Jit(lambda key, x_batch, y_batch: model.loss(key, x_batch, y_batch, num_train, args.num_sample, aux=True), model.vars())
 
         # Log
         np.save(os.path.join(ckpt_dir, "meta.npy"), dict(dataset=dataset_info, args=vars(args)))
@@ -258,12 +273,7 @@ def main(args):
         # Train
         key = random.PRNGKey(args.seed)
 
-        # train_nll, train_acc = validate2(key, valid_train_batches, valid_step2, num_train, alphas, betas)
         valid_nll, valid_acc = validate2(key, valid_batches, valid_step2, num_valid, alphas, betas)
-        # logger.log(f"[{0:5d}] Train " + "=" * 40)
-        # logger.log(indent(pd.DataFrame(train_nll, index=alphas, columns=betas)))
-        # with pd.option_context("display.float_format", "{:.2f}".format):
-        #     logger.log(indent(pd.DataFrame(train_acc * 100, index=alphas, columns=betas)))
         logger.log(f"[{0:5d}] Valid " + "=" * 40)
         logger.log(indent(pd.DataFrame(valid_nll, index=alphas, columns=betas)))
         with pd.option_context("display.float_format", "{:.2f}".format):
@@ -288,6 +298,11 @@ def main(args):
 
                 logger.log(f"[{i:5d}] {print_str}", is_tqdm=True)
 
+                # TODO: Remove this
+                nelbo, ll, kl = elbo_check(key, x_batch, y_batch)
+                nelbo, ll, kl = float(nelbo), float(ll), float(kl)
+                logger.log(f"[{i:5d}] {nelbo = :.4f}, {ll = :.4f}, {kl = :.4f}", is_tqdm=True)
+
             if i % args.valid_interval == 0:
                 valid_nll, valid_acc = validate(key, valid_batches, valid_step, num_valid)
                 logger.log(f"[{i:5d}] NLL: {valid_nll:.5f}  ACC: {valid_acc:.4f}", is_tqdm=True)
@@ -304,13 +319,9 @@ def main(args):
                     if scheduler.lr < args.lr_threshold:
                         break
 
-                # train_nll, train_acc = validate2(key, valid_train_batches, valid_step2, num_train, alphas, betas)
                 nelbos = np.array(train_step2(split_key, x_batch, y_batch)).reshape(len(alphas), len(betas))
                 valid_nll, valid_acc = validate2(key, valid_batches, valid_step2, num_valid, alphas, betas)
                 logger.log(f"[{i:5d}] Train " + "=" * 40, is_tqdm=True)
-                # logger.log(indent(pd.DataFrame(train_nll, index=alphas, columns=betas)), is_tqdm=True)
-                # with pd.option_context("display.float_format", "{:.2f}".format):
-                    # logger.log(indent(pd.DataFrame(train_acc * 100, index=alphas, columns=betas)), is_tqdm=True)
                 logger.log(indent(pd.DataFrame(nelbos, index=alphas, columns=betas)), is_tqdm=True)
                 logger.log(f"[{i:5d}] Valid " + "=" * 40, is_tqdm=True)
                 logger.log(indent(pd.DataFrame(valid_nll, index=alphas, columns=betas)), is_tqdm=True)

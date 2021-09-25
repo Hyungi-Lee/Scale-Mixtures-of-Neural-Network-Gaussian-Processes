@@ -5,6 +5,7 @@ import numpy as np
 from tqdm import tqdm
 from sklearn.cluster import KMeans
 
+import jax
 from jax import random
 from jax import numpy as jnp
 
@@ -60,6 +61,8 @@ def add_subparser(subparsers):
     parser.add_argument("-vi",  "--valid-interval",   type=int, default=500)
     parser.add_argument("-q",   "--quite",            default=False, action="store_true")
     parser.add_argument("-c",   "--comment",          type=str, default="")
+
+    parser.add_argument("-r",   "--resize",           type=int, default=1)
 
 
 def get_inducing_points(X, Y, num_inducing, num_class):
@@ -137,6 +140,13 @@ def main(args):
         num_class = dataset_info["num_class"]
         num_train = x_train.shape[0]
         num_valid = x_valid.shape[0]
+
+        h, w, c = x_train.shape[1:]
+
+        if args.resize > 1:
+            x_train = jax.image.resize(x_train, (num_train, h // args.resize, w // args.resize, c), method="bilinear")
+            x_valid = jax.image.resize(x_valid, (num_valid, h // args.resize, w // args.resize, c), method="bilinear")
+            print(f"Resized to ({h}, {w}, {c}) -> ({', '.join(x_train.shape[1:])})")
 
         # for class_idx in range(num_class):
         #     print(f"{class_idx}: {sum(y_train == class_idx)}")
@@ -218,6 +228,9 @@ def main(args):
 
         save_vc = model.vars() + optimizer.vars()
 
+        # TODO: Remove this
+        elbo_check = objax.Jit(lambda key, x_batch, y_batch: model.loss(key, x_batch, y_batch, num_train, args.num_sample, aux=True), model.vars())
+
         # Log
         np.save(os.path.join(ckpt_dir, "meta.npy"), dict(dataset=dataset_info, args=vars(args)))
         logger.log(get_context_summary(args, dict(num_class=num_class, num_train=num_train, num_valid=num_valid)))
@@ -232,16 +245,10 @@ def main(args):
         best_step = 0
         best_print_str = ""
 
-        elbo_check = objax.Jit(lambda key, x_batch, y_batch: model.loss(key, x_batch, y_batch, num_train, args.num_sample, aux=True), model.vars())
 
         for i, (x_batch, y_batch) in tqdm(enumerate(train_batches, start=1), desc="Train", ncols=0):
             key, split_key = random.split(key)
             n_elbo = train_step(split_key, x_batch, y_batch, scheduler.lr)
-
-            if i % 100 == 0:
-                nelbo, ll, kl = elbo_check(key, x_batch, y_batch)
-                nelbo, ll, kl = float(nelbo), float(ll), float(kl)
-                logger.log(f"[{i:5d}] {nelbo = :.4f}, {ll = :.4f}, {kl = :.4f}", is_tqdm=True)
 
             if i % args.print_interval == 0:
                 ws, bs, ls = model.kernel.get_params()
@@ -253,6 +260,11 @@ def main(args):
                     print_str = f"nELBO: {n_elbo:.5f}  ws: {ws:.4f}  bs: {bs:.3E}  ls: {ls:.4f}"
 
                 logger.log(f"[{i:5d}] {print_str}", is_tqdm=True)
+
+                # TODO: Remove this
+                nelbo, ll, kl = elbo_check(key, x_batch, y_batch)
+                nelbo, ll, kl = float(nelbo), float(ll), float(kl)
+                logger.log(f"[{i:5d}] {nelbo = :.4f}, {ll = :.4f}, {kl = :.4f}", is_tqdm=True)
 
             if i % args.valid_interval == 0:
                 valid_nll, valid_acc = validate(key, valid_batches, valid_step, num_valid)

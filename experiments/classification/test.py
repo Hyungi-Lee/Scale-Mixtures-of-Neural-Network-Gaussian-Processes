@@ -105,6 +105,9 @@ def main(args):
         args.alpha = context_info["args"]["alpha"]
         args.beta = context_info["args"]["beta"]
 
+    if last_w_std is None:
+        last_w_std = jnp.array(context_info["args"]["last_w_std"])
+
     # args.method = "svtp"
     # a = jnp.array(3.)
     # args.alpha = a
@@ -130,6 +133,11 @@ def main(args):
 
     num_class = dataset_info["num_class"]
     num_test = x_test.shape[0]
+
+
+    import jax
+    h, w, c = inducing_points.shape[1:]
+    x_test = jax.image.resize(x_test, (x_test.shape[0], h, w, c), method="bilinear")
 
     q_mu = q_mu.reshape(num_class, -1)
     q_sqrt = q_sqrt.reshape(num_class, -1)
