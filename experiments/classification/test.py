@@ -1,9 +1,11 @@
 import os
 import glob
-from datetime import datetime
 
 from tqdm import tqdm
 
+import numpy as np
+
+import jax
 from jax import random
 from jax import numpy as jnp
 
@@ -13,33 +15,24 @@ from spax.models import SVSP
 from spax.kernels import NNGPKernel
 from spax.priors import GaussianPrior, InverseGammaPrior
 
-from .data import get_test_dataset, datasets
-from ..nt_kernels import get_mlp_kernel, get_cnn_kernel, get_resnet_kernel
-from ..utils import TestBatch, Checkpointer, Logger
+from .data import get_test_dataset
+from ..nt_kernels import get_cnn_kernel, get_conv_resnet_kernel
+from ..utils import DataLoader, Checkpointer, Logger
 
 
 def add_subparser(subparsers):
     parser = subparsers.add_parser("test", aliases=["ts"])
     parser.set_defaults(func=main)
 
-    # parser.add_argument("-m",   "--method",      choices=["svgp", "svtp"], required=None)
-    # parser.add_argument("-n",   "--network",     choices=["cnn", "resnet", "mlp"], default=None)
-
-    parser.add_argument("-dn",  "--data-name",   choices=datasets, required=True)
-    parser.add_argument("-dr",  "--data-root",   type=str, default="./data")
-    parser.add_argument("-cr",  "--ckpt-root",   type=str, default="./ckpt")
-    parser.add_argument("-cn",  "--ckpt-name",   type=str, required=True)
-    parser.add_argument("-ci",  "--ckpt-index",  type=int, default=None)
-    parser.add_argument("-er",  "--eval-root",   type=str, default="./eval")
-    parser.add_argument("-en",  "--eval-name",   type=str, default=None)
-
-    parser.add_argument("-nts", "--num-test",    type=int, default=None)
-    parser.add_argument("-ns",  "--num-sample",  type=int, default=10000)
-
-    # parser.add_argument("-nh",  "--num-hiddens", type=int, default=4)
-    # parser.add_argument("-act", "--activation",  choices=["erf", "relu"], default="relu")
-
-    parser.add_argument("-q",   "--quite",       default=False, action="store_true")
+    parser.add_argument("-dr", "--data-root",  type=str, default="./data")
+    parser.add_argument("-dn", "--data-name",  required=True)
+    parser.add_argument("-cd", "--ckpt-dir",   type=str, required=True)
+    parser.add_argument("-ci", "--ckpt-index", type=int, default=None)
+    parser.add_argument("-nd", "--num-data",   type=int, default=None)
+    parser.add_argument("-nb", "--num-batch",  type=int, default=100)
+    parser.add_argument("-ns", "--num-sample", type=int, default=10000)
+    parser.add_argument("-s",  "--seed",       type=int, default=10)
+    parser.add_argument("-q",  "--quite",      default=False, action="store_true")
 
 
 def build_test_step(model, num_samples, jit=True):
@@ -49,19 +42,19 @@ def build_test_step(model, num_samples, jit=True):
     return objax.Jit(test_step, model.vars()) if jit else test_step
 
 
-def test(key, test_batches, test_step, num_test):
-    test_nll_list = []
+def test_epoch(key, test_loader, test_step):
+    nll_list = []
     total_corrects = 0
 
-    for x_batch, y_batch in tqdm(test_batches, desc="Test", leave=False, ncols=0):
+    for x_batch, y_batch in tqdm(test_loader, desc="Test", leave=False, ncols=0):
         key, split_key = random.split(key)
         nll, corrects = test_step(split_key, x_batch, y_batch)
-        test_nll_list.append(nll)
+        nll_list.append(nll)
         total_corrects += corrects
 
-    test_nll = (jnp.sum(jnp.array(test_nll_list)) / num_test).item()
-    test_acc = (total_corrects / num_test).item()
-    return test_nll, test_acc
+    valid_nll = (np.sum(np.array(nll_list)) / test_loader.num_data).item()
+    valid_acc = (total_corrects * 100 / test_loader.num_data).item()
+    return valid_nll, valid_acc
 
 
 def get_from_vars(saved_vars, key):
@@ -73,19 +66,20 @@ def get_from_vars(saved_vars, key):
 
 
 def main(args):
-    # Log
-
-    # Temp
-    ckpt_dir = os.path.join(os.path.expanduser(args.ckpt_root), args.ckpt_name)
-    # eval_dir = os.path.join(os.path.expanduser(args.eval_root), args.eval_name)
-    # logger = Logger(eval_dir, quite=args.quite)
     if args.ckpt_index is None:
-        args.ckpt_indx = int("".join(sorted(glob.glob(os.path.join(ckpt_dir, Checkpointer.FILE_MATCH)))[-1].split(".")[:-1]))
+        last_ckpt = sorted(glob.glob(os.path.join(args.ckpt_dir, Checkpointer.FILE_MATCH)))[-1]
+        args.ckpt_index = int("".join(last_ckpt.split("/")[-1].split(".")[:-1]))
 
-    saved_vars = jnp.load(os.path.join(ckpt_dir, Checkpointer.FILE_FORMAT.format(args.ckpt_index)))
-    context_info = jnp.load(os.path.join(ckpt_dir, "meta.npy"), allow_pickle=True).item()
+    # Dataset
+    (x_test, y_test), (num_class, data_name) = get_test_dataset(
+        name=args.data_name, root=args.data_root,
+        num_data=args.num_data, normalize=True,
+    )
 
-    # Model params
+    # Load
+    saved_vars = jnp.load(os.path.join(args.ckpt_dir, Checkpointer.FILE_FORMAT.format(args.ckpt_index)))
+    context = jnp.load(os.path.join(args.ckpt_dir, "meta.npy"), allow_pickle=True).item()
+
     a = get_from_vars(saved_vars, "a")
     b = get_from_vars(saved_vars, "b")
     w_std = get_from_vars(saved_vars, "w_std")
@@ -96,78 +90,45 @@ def main(args):
     q_sqrt = get_from_vars(saved_vars, "q_sqrt")
 
     # Context
-    dataset_stat = context_info["dataset"]["stat"]
-    args.method = context_info["args"]["method"]
-    args.network = context_info["args"]["network"]
-    args.num_hiddens = context_info["args"]["num_hiddens"]
-    args.activation = context_info["args"]["activation"]
-    if "alpha" in context_info["args"]:
-        args.alpha = context_info["args"]["alpha"]
-        args.beta = context_info["args"]["beta"]
+    method = context["method"]
+    network = context["network"]
+    num_hiddens = context["num_hiddens"]
+    activation = context["activation"]
+    if "alpha" in context:
+        alpha = context["alpha"]
+        beta = context["beta"]
 
     if last_w_std is None:
-        last_w_std = jnp.array(context_info["args"]["last_w_std"])
+        last_w_std = np.array(context["last_w_std"])
 
-    # args.method = "svtp"
-    # a = jnp.array(3.)
-    # args.alpha = a
-    # b = jnp.array(.01)
-    # args.beta = b
+    # Log
+    log_dir = os.path.join(args.ckpt_dir, "test")
+    log_name = f"{method}-{network}-{data_name.replace('/', '-')}-{args.ckpt_index}.log"
+    logger = Logger(log_dir, log_name, quite=args.quite)
 
-    # print(a.item(), b.item())
-
-    class TempLogger:
-        def log(self, *args, **kwargs):
-            print(*args)
-        def close(self):
-            pass
-
-    logger = TempLogger()
-
-    # Dataset
-    x_test, y_test, dataset_info = get_test_dataset(
-        name=args.data_name, root=args.data_root,
-        num_test=args.num_test, normalize=True,
-        dataset_stat=dataset_stat,
-    )
-
-    num_class = dataset_info["num_class"]
-    num_test = x_test.shape[0]
-
-
-    import jax
+    # Resize
     h, w, c = inducing_points.shape[1:]
     x_test = jax.image.resize(x_test, (x_test.shape[0], h, w, c), method="bilinear")
 
-    q_mu = q_mu.reshape(num_class, -1)
-    q_sqrt = q_sqrt.reshape(num_class, -1)
-
     # Kernel
-    if dataset_info["type"] == "image":
-        if args.network == "cnn":
-            args.network = "cnn"
-            base_kernel_fn = get_cnn_kernel
-        else:
-            args.network = "resnet"
-            base_kernel_fn = get_resnet_kernel
-    elif dataset_info["type"] == "feature":
-        args.network = "mlp"
-        base_kernel_fn = get_mlp_kernel
+    if network == "cnn":
+        base_kernel_fn = get_cnn_kernel
+    else:
+        network = "resnet"
+        base_kernel_fn = get_conv_resnet_kernel
 
     def get_kernel_fn(w_std, b_std, last_w_std):
         return base_kernel_fn(
-            args.num_hiddens, num_class, args.activation,
+            num_hiddens, num_class, activation,
             w_std=w_std, b_std=b_std, last_w_std=last_w_std,
         )
 
     kernel = NNGPKernel(get_kernel_fn, 0, 0, 0)
 
-    # Model
-
-    if args.method == "svgp":
+    if method == "svgp":
         prior = GaussianPrior()
-    elif args.method == "svtp":
-        prior = InverseGammaPrior(args.alpha, args.beta)
+    elif method == "svtp":
+        prior = InverseGammaPrior(alpha, beta)
 
     model = SVSP(prior, kernel, inducing_points, num_latent_gps=num_class)
     model.kernel.w_std.assign(w_std)
@@ -175,21 +136,22 @@ def main(args):
     model.kernel.last_w_std.assign(last_w_std)
     model.q_mu.assign(q_mu)
     model.q_sqrt.assign(q_sqrt)
-    if args.method == "svtp":
+    if method == "svtp":
         model.prior.a.assign(a)
         model.prior.b.assign(b)
 
-    print(model.vars(), end="\n\n")
+    logger.log(f"Data: {data_name}")
+    logger.log(f"Epoch: {args.ckpt_index}")
+    logger.log("\n" + str(model.vars()) + "\n")
 
     # Build functions
-    num_test_batch = 100
-
     test_step = build_test_step(model, args.num_sample)
-    test_batches = TestBatch(x_test, y_test, num_test_batch)
+    test_loader = DataLoader(x_test, y_test, batch_size=args.num_batch, shuffle=False)
 
-    # Train
-    key = random.PRNGKey(10)
+    # Test
+    key = random.PRNGKey(args.seed)
 
-    test_nll, test_acc = test(key, test_batches, test_step, num_test)
-    logger.log(f"NLL: {test_nll:.5f}  ACC: {test_acc:.4f}\n")
+    test_nll, test_acc = test_epoch(key, test_loader, test_step)
+
+    logger.log(f"NLL: {test_nll:.5f}  ACC: {test_acc:.2f}\n")
     logger.close()

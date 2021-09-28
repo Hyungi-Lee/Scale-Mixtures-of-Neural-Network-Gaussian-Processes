@@ -6,15 +6,6 @@ from .base import Module, ConstraintTrainVar
 from .bijectors import positive
 
 
-class ConstTrainVarWrapper:
-    def __init__(self, value):
-        self.value = value
-
-    @property
-    def safe_value(self):
-        return self.value
-
-
 class NNGPKernel(Module):
     def __init__(
         self,
@@ -29,10 +20,7 @@ class NNGPKernel(Module):
         self._get_kernel_fn = get_kernel_fn
         self.w_std = ConstraintTrainVar(jnp.array(w_std), constraint=positive())
         self.b_std = ConstraintTrainVar(jnp.array(b_std), constraint=positive())
-        if const_last_w_std:
-            self.last_w_std = ConstTrainVarWrapper(last_w_std)
-        else:
-            self.last_w_std = ConstraintTrainVar(jnp.array(last_w_std), constraint=positive())
+        self.last_w_std = ConstraintTrainVar(jnp.array(last_w_std), constraint=positive())
         self.diag_reg = diag_reg
 
     def K(self, kernel_fn, x, x2=None):

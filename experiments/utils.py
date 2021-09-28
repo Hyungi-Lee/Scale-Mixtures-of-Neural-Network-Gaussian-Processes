@@ -1,14 +1,16 @@
+from typing import Optional
+
 import os
 import glob
 import math
+import random
 
 from tqdm import tqdm
 
-from jax import random
-from jax import numpy as jnp
+import numpy as np
 
 from objax.variable import VarCollection
-from objax.io.ops import load_var_collection, save_var_collection
+from objax.io.ops import save_var_collection
 
 
 __all__ = [
@@ -37,77 +39,77 @@ def get_context_summary(args, values_dict, indent=2):
     return s
 
 
-class TrainBatch:
-    def __init__(self, x, y, batch_size, seed=0):
-        self.x = x
-        self.y = y
-        self.batch_size = batch_size
+class DataLoader:
+    def __init__(self, x, y, batch_size: Optional[int] = None, *, shuffle: bool = False, seed: int = 0):
+        self.shuffle = shuffle
         self.seed = seed
 
+        self.x = np.array(x)
+        self.y = np.array(y)
+        self.indices = list(range(x.shape[0]))
+        self.batch_size = (x.shape[0] if batch_size is None else batch_size)
+
+        self.not_use_indices = (batch_size is None and not shuffle)
+        self._batch_indices = None
+        self._batch_idx = None
+
     def __iter__(self):
-        self.key = random.PRNGKey(self.seed)
-        self.step = 0
+        if self.shuffle:
+            self.seed += 1
+            indices = self.indices.copy()
+            random.Random(self.seed).shuffle(indices)
+        else:
+            indices = self.indices
+
+        self._batch_idx = 0
+        if not self.not_use_indices:
+            self._batch_indices = [indices[i: i + self.batch_size]
+                                   for i in range(0, len(indices), self.batch_size)]
         return self
 
     def __next__(self):
-        self.step += 1
-        self.key, split = random.split(self.key)
+        if self.not_use_indices:
+            if self._batch_idx > 0:
+                raise StopIteration
+        else:
+            if self._batch_idx >= len(self._batch_indices):
+                raise StopIteration
 
-        random_idxs = random.permutation(split, jnp.arange(self.x.shape[0], dtype=int))
-        random_x = self.x[random_idxs]
-        random_y = self.y[random_idxs]
+        if self.not_use_indices:
+            x_batch = self.x
+            y_batch = self.y
+        else:
+            indices = self._batch_indices[self._batch_idx]
+            x_batch = self.x[indices]
+            y_batch = self.y[indices]
 
-        x_batch = random_x[:self.batch_size]
-        y_batch = random_y[:self.batch_size]
+        self._batch_idx += 1
 
         return x_batch, y_batch
-
-
-class TestBatch:
-    def __init__(self, x, y, batch_size):
-        self.x = x
-        self.y = y
-        self.batch_size = batch_size
-        self.batch_len = (x.shape[0] // batch_size) + (1 if x.shape[0] % batch_size else 0)
-
-    def __iter__(self):
-        self.batch_i = 0
-        return self
 
     def __len__(self):
-        return self.batch_len
+        return math.ceil(len(self.indices) / self.batch_size)
 
-    def __next__(self):
-        if self.batch_i >= self.batch_len:
-            raise StopIteration
-
-        batch_start = self.batch_i * self.batch_size
-        batch_end = batch_start + self.batch_size
-        x_batch = self.x[batch_start: batch_end]
-        y_batch = self.y[batch_start: batch_end]
-
-        self.batch_i += 1
-
-        return x_batch, y_batch
+    @property
+    def num_data(self):
+        return self.x.shape[0]
 
 
 class Checkpointer:
     FILE_MATCH: str = "*.npz"
-    FILE_FORMAT: str = "{:06d}.npz"
+    FILE_FORMAT: str = "{:03d}.npz"
 
     def __init__(
         self,
         logdir: str,
         keep_ckpts: int = 10,
         makedir: bool = True,
-        patience: int = 10,
     ):
         self.logdir = logdir
         self.keep_ckpts = keep_ckpts
-        self.patience = patience
         if makedir:
             os.makedirs(logdir, exist_ok=True)
-        self.best_losses = [float("inf")]
+        self.best_loss = float("inf")
 
     def save(self, idx: int, vc: VarCollection):
         assert isinstance(vc, VarCollection), f"Must pass a VarCollection to save; received type {type(vc)}."
@@ -116,29 +118,23 @@ class Checkpointer:
             os.remove(ckpt)
 
     def step(self, idx, loss: float, vc):
-        updated, stop = False, False
-
-        if loss < self.best_losses[0]:
+        if loss < self.best_loss:
+            self.best_loss = loss
             self.save(idx, vc)
             updated = True
-        elif loss > self.best_losses[-1] and len(self.best_losses) == self.patience:
-            stop = True
-        elif math.isnan(loss):
-            stop = True
-
-        self.best_losses = sorted(self.best_losses + [loss])[:self.patience]
-        return updated, stop
+        else:
+            updated = False
+        return updated
 
 
 class Logger:
-    FILE_NAME: str = "train.log"
-
-    def __init__(self, logdir: str, makedir: bool = True, quite: bool = False):
+    def __init__(self, logdir: str, filename: str = "train.log", makedir: bool = True, quite: bool = False):
         self.logdir = logdir
         self.quite = quite
         if makedir:
             os.makedirs(logdir, exist_ok=True)
-        self.logfile = open(os.path.join(logdir, self.FILE_NAME), "w")
+        self.filename = filename
+        self.logfile = open(os.path.join(logdir, self.filename), "w")
 
     def log(self, *args, is_tqdm: bool = False):
         s = "".join(map(str, args))
@@ -154,13 +150,9 @@ class Logger:
         self.logfile.close()
 
 
-
-inf = float("inf")
-
-
 class ReduceLROnPlateau:
     def __init__(self, lr, mode="min", factor=0.1, patience=10,
-                 threshold=1e-4, threshold_mode="rel", cooldown=0,
+                 threshold=1e-4, threshold_mode="rel",
                  min_lr=0, eps=1e-8, verbose=False):
 
         self.lr = lr
@@ -168,8 +160,6 @@ class ReduceLROnPlateau:
         self.min_lr = min_lr
         self.patience = patience
         self.verbose = verbose
-        self.cooldown = cooldown
-        self.cooldown_counter = 0
         self.mode = mode
         self.threshold = threshold
         self.threshold_mode = threshold_mode
@@ -183,7 +173,6 @@ class ReduceLROnPlateau:
 
     def _reset(self):
         self.best = self.mode_worse
-        self.cooldown_counter = 0
         self.num_bad_epochs = 0
 
     def step(self, metrics):
@@ -198,13 +187,8 @@ class ReduceLROnPlateau:
         else:
             self.num_bad_epochs += 1
 
-        if self.in_cooldown:
-            self.cooldown_counter -= 1
-            self.num_bad_epochs = 0  # ignore any bad epochs in cooldown
-
         if self.num_bad_epochs > self.patience:
             self._reduce_lr()
-            self.cooldown_counter = self.cooldown
             self.num_bad_epochs = 0
             reduced = True
 
@@ -215,10 +199,6 @@ class ReduceLROnPlateau:
         new_lr = max(old_lr * self.factor, self.min_lr)
         if old_lr - new_lr > self.eps:
             self.lr = new_lr
-
-    @property
-    def in_cooldown(self):
-        return self.cooldown_counter > 0
 
     def is_better(self, a, best):
         if self.mode == "min" and self.threshold_mode == "rel":
@@ -242,9 +222,9 @@ class ReduceLROnPlateau:
             raise ValueError("threshold mode " + threshold_mode + " is unknown!")
 
         if mode == "min":
-            self.mode_worse = inf
+            self.mode_worse = float("inf")
         else:  # mode == "max":
-            self.mode_worse = -inf
+            self.mode_worse = -float("inf")
 
         self.mode = mode
         self.threshold = threshold

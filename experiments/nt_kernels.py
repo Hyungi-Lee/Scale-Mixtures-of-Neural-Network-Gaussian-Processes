@@ -4,7 +4,7 @@ from neural_tangents import stax
 __all__ = [
     "get_mlp_kernel",
     "get_cnn_kernel",
-    "get_resnet_kernel",
+    "get_conv_resnet_kernel",
     "get_dense_resnet_kernel",
 ]
 
@@ -45,7 +45,7 @@ def get_cnn_kernel(num_hiddens, num_class=1, act="relu", w_std=1., b_std=0., las
     return  kernel_fn
 
 
-def get_resnet_kernel(num_hiddens, num_class, act="relu", w_std=1., b_std=0., last_w_std=1.):
+def get_conv_resnet_kernel(num_hiddens, num_class, act="relu", w_std=1., b_std=0., last_w_std=1.):
     act_class = get_act_class(act)
 
     def WideResnetBlock(channels, strides=(1, 1), channel_mismatch=False):

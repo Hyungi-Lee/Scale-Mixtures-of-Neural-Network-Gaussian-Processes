@@ -1,43 +1,60 @@
 import numpy as np
 import tensorflow_datasets as tfds
+from jax.nn import one_hot
 
 
 __all__ = [
-    "datasets",
+    "DATASETS",
     "get_train_dataset",
     "get_test_dataset",
 ]
 
 
-image_datasets = [
-    "mnist",
-    "mnist_imbalanced",
-    "fashion_mnist",
-    "kmnist",
-    "cifar10",
-    "cifar100",
-    "svhn_cropped",
-    "emnist",
-    "emnist/letters",
-    "mnist_corrupted/shot_noise",
-    "mnist_corrupted/impulse_noise",
-    "mnist_corrupted/spatter",
-    "mnist_corrupted/glass_blur",
-    "mnist_corrupted/zigzag",
-    "cifar10_corrupted/spatter_5",
-    "cifar10_corrupted/brightness_5",
-    "cifar10_corrupted/fog_5",
-    "cifar10_corrupted/defocus_blur_5",
-    "cifar10_corrupted/frosted_glass_blur_5",
-    "cifar10_corrupted/gaussian_noise_5",
-    "cifar10_imbalanced",
-]
+DATASETS_DICT = {
+    # MNIST
+    "mnist/default": ("mnist", "default", None),
+    "mnist/ood": ("mnist", "ood", (1,4,8)),
+    "mnist/imbalanced": ("mnist", "imbalanced", ("exp", .5)),
+    "mnist/noisy_label": ("mnist", "noisy_label", 0.1),
+    "mnist/shot_noise": ("mnist_corrupted/shot_noise", "corrupted", None),
+    "mnist/impulse_noise": ("mnist_corrupted/impulse_noise", "corrupted", None),
+    "mnist/spatter": ("mnist_corrupted/spatter", "corrupted", None),
+    "mnist/glass_blur": ("mnist_corrupted/glass_blur", "corrupted", None),
+    "mnist/zigzag": ("mnist_corrupted/zigzag", "corrupted", None),
+    # KMNIST
+    "kmnist/default": ("kmnist", "default", None),
+    "kmnist/ood": ("kmnist", "ood", (1,4,8)),
+    "kmnist/imbalanced": ("kmnist", "imbalanced", ("exp", .5)),
+    "kmnist/noisy_label": ("kmnist", "noisy_label", 0.1),
+    # Fashion MNIST
+    "fashion_mnist/default": ("fashion_mnist", "default", None),
+    "fashion_mnist/ood": ("fashion_mnist", "ood", (1,4,8)),
+    "fashion_mnist/imbalanced": ("fashion_mnist", "imbalanced", ("exp", .5)),
+    "fashion_mnist/noisy_label": ("fashion_mnist", "noisy_label", 0.1),
+    # EMNIST
+    "emnist/default": ("emnist/letters", "default", None),
+    "emnist/ood": ("emnist/letters", "ood", (1,4,8)),
+    "emnist/imbalanced": ("emnist/letters", "imbalanced", ("exp", .5)),
+    "emnist/noisy_label": ("emnist/letters", "noisy_label", 0.1),
+    # CIFAR10
+    "cifar10/default": ("cifar10", "default", None),
+    "cifar10/ood": ("cifar10", "ood", (1,4,8)),
+    "cifar10/imbalanced": ("cifar10", "imbalanced", ("exp", .5)),
+    "cifar10/noisy_label": ("cifar10", "noisy_label", 0.1),
+    # SVHN
+    "svhn/default": ("svhn_cropped", "default", None),
+    "svhn/ood": ("svhn_cropped", "ood", (1,4,8)),
+    "svhn/imbalanced": ("svhn_cropped", "imbalanced", ("exp", .5)),
+    "svhn/noisy_label": ("svhn_cropped", "noisy_label", 0.1),
+}
 
-feature_datasets = [
-    "iris",
-]
+DATASETS = list(DATASETS_DICT.keys())
 
-datasets = image_datasets + feature_datasets
+DATASET_FORMATTER = {
+    "ood": lambda option: ",".join(map(str, option)),
+    "imbalanced": lambda option: f"{option[0]}{option[1]}",
+    "noisy_label": lambda option: str(option),
+}
 
 
 def permute_dataset(x, y, seed=0):
@@ -59,152 +76,172 @@ def get_num_class_data(num_data_per_class, num_class, mode="exp", factor=1):
     return d
 
 
-def get_train_dataset(
-    name,
-    root="./data",
-    num_data=None,
-    valid_prop=0.1,
-    normalize=True,
-    seed=0,
-):
-    meta = {}
+def parse_dataset(name):
+    tokens = name.split("/")
 
-    if name.endswith("_imbalanced"):
-        imbalanced = True
-        name = name[:-11]
+    base_name = tokens[0]
+    detail_name = tokens[1] if len(tokens) > 1 else "default"
+    option = None
+
+    if len(tokens) > 2:
+        if detail_name == "ood":
+            try:
+                option = list(map(int, tokens[2].split(",")))
+            except:
+                raise ValueError(f"Invalid OOD option: {tokens[2]}")
+        elif detail_name == "imbalanced":
+            if tokens[2].startswith("exp"):
+                option = ("exp", float(tokens[2][3:]))
+            elif tokens[2].startswith("step"):
+                option = ("step", float(tokens[2][4:]))
+            else:
+                raise ValueError(f"Invalid imbalanced option {tokens[2]}")
+        elif detail_name == "noisy_label":
+            try:
+                option = float(tokens[2])
+            except:
+                raise ValueError(f"Invalid noisy label option: {tokens[2]}")
+
+    dname = f"{base_name}/{detail_name}"
+
+    if dname in DATASETS_DICT:
+        base, detail, default_option = DATASETS_DICT[dname]
+        if option is None:
+            option = default_option
+
+        clean_name = dname
+        if option is not None:
+            clean_name += "/" + DATASET_FORMATTER[detail](option)
     else:
-        imbalanced = False
+        raise ValueError(f"Unsupported dataset: {dname}")
 
-    if name in feature_datasets:
-        ds_builder = tfds.builder(name)
-        ds_train, = tfds.as_numpy(
-            tfds.load(name, data_dir=root, split=["train"],
-                      batch_size=-1, as_dataset_kwargs=dict(shuffle_files=False))
-        )
-        x, y = ds_train["features"], ds_train["label"]
-        x, y = permute_dataset(x, y, seed=109)
+    return (base, detail, option), clean_name
 
-        if num_data is None:
-            raise ValueError("Must provide num_train and num_test")
 
-        x_train, y_train = x[:num_data], y[:num_data]
-        meta["type"] = "feature"
+def normalize_dataset(name, x_data):
+    if "mnist" in name:
+        x_mean = np.array((0.5,))
+        x_std = np.array((0.5,))
+    elif "cifar" in name or "svhn" in name:
+        x_mean = np.array((0.4914, 0.4822, 0.4465))
+        x_std  = np.array((0.2023, 0.1994, 0.2010))
 
-    elif name in image_datasets:
-        ds_builder = tfds.builder(name)
-        ds_train, = tfds.as_numpy(
-            tfds.load(name, data_dir=root, split=["train"],
-                      batch_size=-1, as_dataset_kwargs=dict(shuffle_files=False))
-        )
-        x_train, y_train = ds_train["image"], ds_train["label"]
-        meta["type"] = "image"
+    edim = list(range(x_data.ndim - 1))
+    x_mean = np.expand_dims(x_mean, axis=edim)
+    x_std = np.expand_dims(x_std, axis=edim)
+    x_data = (x_data - x_mean) / x_std
 
-    else:
-        raise KeyError("Unsupported dataset '{}'".format(name))
+    return x_data
 
+
+def get_train_dataset(name, root="./data", num_data=None, valid_prop=0.1, normalize=True, onehot=False, seed=0):
+    (base, detail, option), clean_name = parse_dataset(name)
+
+    ds_builder = tfds.builder(base)
+    ds_train, = tfds.as_numpy(
+        tfds.load(base, data_dir=root, split=["train"],
+                  batch_size=-1, as_dataset_kwargs=dict(shuffle_files=False))
+    )
+
+    x_data, y_data = ds_train["image"], ds_train["label"]
     num_class = ds_builder.info.features["label"].num_classes
-    meta["num_class"] = num_class
+    x_data = x_data / 255.
 
-    x_train, y_train = permute_dataset(x_train, y_train, seed=seed)
+    debug_msg = ""
+
+    if detail == "noisy_label":
+        noise_prob = option
+        idx = (np.random.RandomState(seed).uniform(size=y_data.shape[0]) < noise_prob)
+        noise_label = np.random.RandomState(seed).randint(num_class, size=np.sum(idx))
+        y_data[idx] = noise_label
+        debug_msg = f"{np.sum(idx)} / {y_data.shape[0]} (noisy labels)"
+    elif detail == "ood":
+        out_labels = option
+        idx = np.all(np.vstack([(y_data != label)[None, :] for label in out_labels]), axis=0)
+        x_data, y_data = x_data[idx], y_data[idx]
+        data_in_class = [str(np.sum(y_data == label)) for label in range(num_class)]
+        debug_msg = str(data_in_class) + " (data / class)"
+
+    x_data, y_data = permute_dataset(x_data, y_data, seed=seed)
+
     if num_data is None:
-        num_data = x_train.shape[0]
+        num_data = x_data.shape[0]
 
-    if imbalanced:
+    if detail == "imbalanced":
+        mode, factor = option
         data_class = []
         for class_idx in range(num_class):
-            idxs = [y_train == class_idx]
-            data_class.append((x_train[idxs], y_train[idxs]))
-        min_num_data_per_class = min(map(lambda v: len(v[0]), data_class))
+            idx = [y_data == class_idx]
+            data_class.append((x_data[idx], y_data[idx]))
+        min_num_data_per_class = min(map(lambda v: v[0].shape[0], data_class))
         num_train_per_class = int(min_num_data_per_class * (1 - valid_prop))
         num_valid_per_class = min_num_data_per_class - num_train_per_class
-        num_class_data = get_num_class_data(min_num_data_per_class, num_class, mode="exp", factor=.5)
+        num_class_data = get_num_class_data(min_num_data_per_class, num_class, mode=mode, factor=factor)
         num_valid = num_class * num_valid_per_class
         num_train = sum(num_class_data)
-        assert num_valid > 0, "num_valid must be > 0"
 
-        x_valid = np.concatenate([x[-num_valid_per_class:] for (x, _) in data_class])
-        y_valid = np.concatenate([y[-num_valid_per_class:] for (_, y) in data_class])
+        if num_valid:
+            x_valid = np.concatenate([x[-num_valid_per_class:] for (x, _) in data_class])
+            y_valid = np.concatenate([y[-num_valid_per_class:] for (_, y) in data_class])
         x_train = np.concatenate([x[:num_train] for num_train, (x, _) in zip(num_class_data, data_class)])
         y_train = np.concatenate([y[:num_train] for num_train, (_, y) in zip(num_class_data, data_class)])
         x_train, y_train = permute_dataset(x_train, y_train, seed=seed)
 
+        if num_valid:
+            data_in_class = [str(np.sum(y_train == label) + np.sum(y_valid == label)) for label in range(num_class)]
+        else:
+            data_in_class = [str(np.sum(y_train == label)) for label in range(num_class)]
+
+        debug_msg = str(data_in_class) + " (data / class)"
+
     else:
         num_valid = int(num_data * valid_prop)
         num_train = num_data - num_valid
-        assert num_valid > 0, "num_valid must be > 0"
 
-        x_train, y_train = x_train[:num_train], y_train[:num_train]
-        x_valid, y_valid = x_train[-num_valid:], y_train[-num_valid:]
+        x_train, y_train = x_data[:num_train], y_data[:num_train]
+        if num_valid:
+            x_valid, y_valid = x_data[-num_valid:], y_data[-num_valid:]
 
     if normalize:
-        edim = list(range(x_train.ndim - 1))
-        if "cifar" in name:
-            x_mean = np.expand_dims(np.array((0.4914, 0.4822, 0.4465)) * 255., axis=edim)
-            x_std  = np.expand_dims(np.array((0.2023, 0.1994, 0.2010)) * 255., axis=edim)
-        else:
-            x_data = np.concatenate((x_train, x_valid), axis=0)
-            x_mean = np.expand_dims(np.mean(x_data.reshape(-1, x_data.shape[-1]), axis=0), axis=edim)
-            x_std  = np.expand_dims(np.std(x_data.reshape(-1, x_data.shape[-1]),  axis=0), axis=edim)
-        x_train = (x_train - x_mean) / x_std
-        x_valid = (x_valid - x_mean) / x_std
-        meta["stat"] = dict(x_mean=x_mean, x_std=x_std)
+        x_train = normalize_dataset(clean_name, x_train)
+        if num_valid:
+            x_valid = normalize_dataset(clean_name, x_valid)
+
+    if onehot:
+        y_train = one_hot(y_train, num_class)
+        if num_valid:
+            y_valid = one_hot(y_valid, num_class)
+
+    if num_valid:
+        return (x_train, y_train), (x_valid, y_valid), (num_class, clean_name, debug_msg)
     else:
-        x_train = np.array(x_train).astype(float)
-        x_valid = np.array(x_valid).astype(float)
-
-    return x_train, y_train, x_valid, y_valid, meta
+        return (x_train, y_train), (num_class, clean_name, debug_msg)
 
 
-def get_test_dataset(
-    name,
-    root="./data",
-    num_test=None,
-    normalize=True,
-    dataset_stat=None,
-):
-    meta = {}
+def get_test_dataset(name, root="./data", num_data=None, normalize=True, onehot=False):
+    (base, detail, _), clean_name = parse_dataset(name)
 
-    if name.endswith("_imbalanced"):
-        raise KeyError("Test dataset doesn't support imbalanced dataset")
+    if detail in ["ood", "imbalanced", "noisy_label"]:
+        raise KeyError(f"Test dataset doesn't support {detail} dataset")
 
-    if name in feature_datasets:
-        ds_builder = tfds.builder(name)
-        ds_train, = tfds.as_numpy(
-            tfds.load(name, data_dir=root, split=["train"],
-                      batch_size=-1, as_dataset_kwargs=dict(shuffle_files=False))
-        )
-        x, y = ds_train["features"], ds_train["label"]
-        x, y = permute_dataset(x, y, seed=109)
+    ds_builder = tfds.builder(base)
+    ds_test, = tfds.as_numpy(
+        tfds.load(base, data_dir=root, split=["test"],
+                  batch_size=-1, as_dataset_kwargs=dict(shuffle_files=False))
+    )
 
-        if num_test is None or num_test is None:
-            raise ValueError("Must provide num_train and num_test")
-
-        x_test, y_test = x[-num_test:], y[-num_test:]
-        meta["type"] = "feature"
-
-    elif name in image_datasets:
-        ds_builder = tfds.builder(name)
-        ds_test, = tfds.as_numpy(
-            tfds.load(name, data_dir=root, split=["test"],
-                      batch_size=-1, as_dataset_kwargs=dict(shuffle_files=False))
-        )
-        x_test, y_test = ds_test["image"], ds_test["label"]
-        meta["type"] = "image"
-
-    else:
-        raise KeyError("Unsupported dataset '{}'".format(name))
-
+    x_test, y_test = ds_test["image"], ds_test["label"]
     num_class = ds_builder.info.features["label"].num_classes
-    meta["num_class"] = num_class
+    x_test = x_test / 255.
 
-    if num_test:
-        x_test, y_test = x_test[:num_test], y_test[:num_test]
+    if num_data is not None:
+        x_test, y_test = permute_dataset(x_test, y_test, seed=109)
+        x_test, y_test = x_test[:num_data], y_test[:num_data]
 
     if normalize:
-        x_mean = dataset_stat["x_mean"]
-        x_std  = dataset_stat["x_std"]
-        x_test  = (x_test  - x_mean) / x_std
-    else:
-        x_test = np.array(x_test).astype(float)
+        x_test = normalize_dataset(clean_name, x_test)
 
-    return x_test, y_test, meta
+    if onehot:
+        y_test = one_hot(y_test, num_class)
+
+    return (x_test, y_test), (num_class, clean_name)

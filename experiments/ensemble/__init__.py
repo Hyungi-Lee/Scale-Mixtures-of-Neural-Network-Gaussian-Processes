@@ -1,13 +1,10 @@
 from . import (
-    test,
     train,
-    data,
 )
 
 
 def add_subparser(subparsers):
-    parser = subparsers.add_parser("classification", aliases=["cls"])
+    parser = subparsers.add_parser("ensemble", aliases=["ens"])
     subparsers = parser.add_subparsers(metavar="ops")
 
     train.add_subparser(subparsers)
-    test.add_subparser(subparsers)
