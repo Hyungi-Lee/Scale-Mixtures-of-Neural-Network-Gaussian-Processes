@@ -104,7 +104,7 @@ class SPR(Module):
         require = self.likelihood.require
         if require:
             if "cov_data" in require:
-                cov_data = self.kernel.K(kernel_fn, self.x_data) + jitter(self.num_data, eps=eps)
+                cov_data = self.kernel.K(kernel_fn, self.x_data) #+ jitter(self.num_data, eps=eps)  # TODO: check
             aux_dict = dict(cov_data=cov_data, y_data=self.y_data, num_data=self.num_data)
             aux = tuple(aux_dict[k] for k in require)
         else:

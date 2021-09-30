@@ -128,7 +128,8 @@ def main(args):
             likelihood = GaussianLikelihood()
 
         elif args.method == "tp":
-            kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, 1.)
+            # kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, 1.)
+            kernel = NNGPKernel(get_kernel_fn, args.w_std, args.b_std, args.last_w_std)   # TODO: check
             likelihood = StudentTLikelihood(args.alpha, args.beta)
 
         model = SPR(kernel, likelihood, x_train, y_train, y_mean, y_std, eps=args.epsilon)
@@ -137,7 +138,8 @@ def main(args):
         if args.method == "gp":
             train_vars = model.vars()
         elif args.method == "tp":
-            train_vars = VarCollection({k: v for k, v in model.vars().items() if "last_w_std" not in k})
+            # train_vars = VarCollection({k: v for k, v in model.vars().items() if "last_w_std" not in k})
+            train_vars = model.vars()  # TODO: check
 
         # Optimizer
         if args.optimizer == "adam":
@@ -175,7 +177,8 @@ def main(args):
 
                 if args.method == "tp":
                     ia, ib = (model.likelihood.a.safe_value, model.likelihood.b.safe_value)
-                    print_str = f"nll: {nll:.5f}  ws: {ws:.4f}  bs: {bs:.3E}  a: {ia:.4f}  b: {ib:.4f}  e: {eps:.3E}"
+                    # print_str = f"nll: {nll:.5f}  ws: {ws:.4f}  bs: {bs:.3E}  a: {ia:.4f}  b: {ib:.4f}  e: {eps:.3E}"  # TODO: check
+                    print_str = f"nll: {nll:.5f}  ws: {ws:.4f}  bs: {bs:.3E}  ls: {ls:.4f}  a: {ia:.4f}  b: {ib:.4f}  e: {eps:.3E}"
                 else:
                     print_str = f"nll: {nll:.5f}  ws: {ws:.4f}  bs: {bs:.3E}  ls: {ls:.4f}  e: {eps:.3E}"
 

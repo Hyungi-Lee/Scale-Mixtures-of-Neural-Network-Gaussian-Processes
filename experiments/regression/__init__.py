@@ -1,5 +1,5 @@
 from . import (
-    # test,
+    test,
     train,
     data,
 )
@@ -12,3 +12,4 @@ def add_subparser(subparsers):
     train.add_subparser(subparsers)
     # train1.add_subparser(subparsers)
     # test.add_subparser(subparsers)
+    test.add_subparser(subparsers)

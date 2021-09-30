@@ -49,7 +49,7 @@ def test_epoch(key, test_loader, test_step):
     for x_batch, y_batch in tqdm(test_loader, desc="Test", leave=False, ncols=0):
         key, split_key = random.split(key)
         nll, corrects = test_step(split_key, x_batch, y_batch)
-        nll_list.append(nll)
+        nll_list.append(nll * x_batch.shape[0])
         total_corrects += corrects
 
     valid_nll = (np.sum(np.array(nll_list)) / test_loader.num_data).item()

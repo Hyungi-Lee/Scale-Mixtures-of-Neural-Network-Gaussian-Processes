@@ -56,7 +56,7 @@ class StudentTLikelihood(Likelihood):
 
         df = 2 * a
         cond_df = df + num_data
-        inv_cov_data = jnp.linalg.inv(b / a * cov_data)
+        inv_cov_data = jnp.linalg.inv(b / a * cov_data + jitter(num_data))
         d = df + jnp.einsum("i,ij,j->", y_data, inv_cov_data, y_data)
         sigma = jnp.sqrt(jnp.diag(d / cond_df * b / a * cov))
 
