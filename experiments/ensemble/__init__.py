@@ -1,5 +1,6 @@
 from . import (
     train,
+    test,
 )
 
 
@@ -8,3 +9,4 @@ def add_subparser(subparsers):
     subparsers = parser.add_subparsers(metavar="ops")
 
     train.add_subparser(subparsers)
+    test.add_subparser(subparsers)

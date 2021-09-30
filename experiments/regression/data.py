@@ -11,20 +11,20 @@ from sklearn.datasets import load_boston
 
 
 __all__ = [
-    "datasets",
+    "DATASETS",
     "get_dataset",
     "permute_dataset",
     "split_dataset",
 ]
 
 
-datasets = [
+DATASETS = [
     "boston", "concrete", "energy", "kin8nm", "naval", "plant",
     "wine-red", "wine-white", "yacht", "airfoil", "sic97",
     "syn-normal", "syn-t",
 ]
 
-dataset_urls = {
+DATASET_URLS = {
     "concrete": {
         "Concrete_Data.xls": "http://archive.ics.uci.edu/ml/machine-learning-databases/concrete/compressive/Concrete_Data.xls",
         "Concrete_Readme.txt": "http://archive.ics.uci.edu/ml/machine-learning-databases/concrete/compressive/Concrete_Readme.txt",
@@ -105,7 +105,7 @@ def _download_dataset(name, root):
     dataset_path = os.path.join(root, name)
     os.makedirs(dataset_path, exist_ok=True)
 
-    files = dataset_urls[name]
+    files = DATASET_URLS[name]
 
     for filename, url in files.items():
         filepath = os.path.join(dataset_path, filename)
@@ -117,7 +117,7 @@ def _download_dataset(name, root):
                 _extract_zip(filepath)
 
 
-def get_dataset(name, root="./data", y_newaxis=True):
+def get_dataset(name, root="./data"):
     if name == "boston":  # Boston Housing
         # https://scikit-learn.org/stable/modules/generated/sklearn.datasets.load_boston.html
         x, y = load_boston(return_X_y=True)
@@ -140,7 +140,7 @@ def get_dataset(name, root="./data", y_newaxis=True):
         excel_data = pd.read_excel(filepath)
         data = excel_data.to_numpy()
 
-        x, y = data[:, :8], data[:, 8]  # TODO: need to check
+        x, y = data[:, :8], data[:, 8]
 
     elif name == "kin8nm":  # kin8nm
         # https://www.openml.org/d/189
@@ -238,9 +238,6 @@ def get_dataset(name, root="./data", y_newaxis=True):
     else:
         raise KeyError("Unsupported dataset '{}'".format(name))
 
-    if y_newaxis:
-        y = y[:, np.newaxis]
-
     return x, y
 
 
@@ -285,8 +282,11 @@ def split_dataset(x, y, train, valid, test, normalize_x=True, normalize_y=True):
         y_train = (y_train - y_mean) / y_std
         y_valid = (y_valid - y_mean) / y_std
         y_test = (y_test - y_mean) / y_std
+    else:
+        y_std = 1.
+        y_mean = 0.
 
-    return x_train, y_train, x_valid, y_valid, x_test, y_test
+    return (x_train, y_train), (x_valid, y_valid), (x_test, y_test), (y_std, y_mean)
 
 
 def permute_dataset(x, y, seed=0):

@@ -46,6 +46,7 @@ def add_subparser(subparsers):
     parser.add_argument("-ws",  "--w-std",            type=float, default=1.)
     parser.add_argument("-bs",  "--b-std",            type=float, default=1e-8)
     parser.add_argument("-ls",  "--last-w-std",       type=float, default=1.)
+    parser.add_argument("-eps", "--epsilon",          type=float, default=1e-6)
 
     parser.add_argument("-opt", "--optimizer",        choices=["adam", "sgd"], default="adam")
     parser.add_argument("-lr",  "--lr",               type=float, default=1e-2)
@@ -58,7 +59,6 @@ def add_subparser(subparsers):
     parser.add_argument("-s",   "--seed",             type=int, default=10)
     parser.add_argument("-q",   "--quite",            default=False, action="store_true")
     parser.add_argument("-c",   "--comment",          type=str, default="")
-
 
 
 def build_train_step(model, train_vars, optimizer, num_train, num_samples, jit=True):
@@ -78,33 +78,33 @@ def build_valid_step(model, num_samples, jit=True):
 
 
 def train_epoch(key, train_loader, train_step, learning_rate, train_log):
-    nelbo_list = []
+    total_nelbo = 0.
+    lenb = len(train_loader)
     log_interval = len(train_loader) // 4
-    idxs = range(len(train_loader))
 
-    for idx, (x_batch, y_batch) in tqdm(zip(idxs, train_loader), desc="Train", leave=False, ncols=0):
+    for idx, (x_batch, y_batch) in tqdm(enumerate(train_loader), desc="Train", leave=False, ncols=0, total=lenb):
         key, split_key = random.split(key)
         nelbo = train_step(split_key, x_batch, y_batch, learning_rate)
-        nelbo_list.append(nelbo * x_batch.shape[0])
+        total_nelbo += nelbo.item() * x_batch.shape[0]
         if (idx + 1) % log_interval == 0:
-            train_log(idx, nelbo)
+            train_log(idx + 1, nelbo)
 
-    train_nelbo = (np.sum(np.array(nelbo_list)) / train_loader.num_data).item()
+    train_nelbo = total_nelbo / train_loader.num_data
     return train_nelbo
 
 
 def valid_epoch(key, valid_loader, valid_step):
-    nll_list = []
+    total_nll = 0.
     total_corrects = 0
 
     for x_batch, y_batch in tqdm(valid_loader, desc="Valid", leave=False, ncols=0):
         key, split_key = random.split(key)
         nll, corrects = valid_step(split_key, x_batch, y_batch)
-        nll_list.append(nll)
-        total_corrects += corrects
+        total_nll += nll.item() * x_batch.shape[0]
+        total_corrects += corrects.item()
 
-    valid_nll = (np.sum(np.array(nll_list)) / valid_loader.num_data).item()
-    valid_acc = (total_corrects * 100 / valid_loader.num_data).item()
+    valid_nll = total_nll / valid_loader.num_data
+    valid_acc = total_corrects * 100 / valid_loader.num_data
     return valid_nll, valid_acc
 
 
@@ -171,7 +171,8 @@ def main(args):
         ## Inducing points
         label_class = np.array([sum(y_train == class_idx) for class_idx in range(num_class)])
         num_inducing_class = np.round(args.num_inducing * label_class / sum(label_class)).astype(int).tolist()
-        inducing_points = np.concatenate([x_train[y_train == class_idx][:ni] for class_idx, ni in zip(range(num_class), num_inducing_class)], axis=0)
+        inducing_points = np.concatenate([x_train[y_train == class_idx][:ni]
+                                          for class_idx, ni in zip(range(num_class), num_inducing_class)], axis=0)
         args.num_inducing = inducing_points.shape[0]
 
         ## Prior
@@ -183,14 +184,16 @@ def main(args):
             raise ValueError(f"Unsupported method '{args.method}'")
 
         ## Model
-        model = SVSP(prior, kernel, inducing_points, num_latent_gps=num_class)
+        model = SVSP(prior, kernel, inducing_points, num_latent_gps=num_class, eps=args.epsilon)
+        model_vars = model.vars()
 
         if args.method == "svgp":
             train_vars = model.vars()
 
             def train_log(i, nelbo, log=True):
                 ws, bs, ls = model.kernel.get_params()
-                print_str = f"nELBO: {nelbo:.5f}  ws: {ws:.4f}  bs: {bs:.3E}  ls: {ls:.4f}"
+                eps = model.eps.safe_value
+                print_str = f"nELBO: {nelbo:.5f}  ws: {ws:.4f}  bs: {bs:.3E}  ls: {ls:.4f}  e: {eps:.3E}"
                 if log:
                     logger.log(f"       [{i:4d}]  {print_str}", is_tqdm=True)
                 return print_str
@@ -200,8 +203,9 @@ def main(args):
 
             def train_log(i, nelbo, log=True):
                 ws, bs, _ = model.kernel.get_params()
-                ia, ib = (model.prior.a.safe_value, model.prior.b.safe_value)
-                print_str = f"nELBO: {nelbo:.5f}  ws: {ws:.4f}  bs: {bs:.3E}  a: {ia:.4f}  b: {ib:.4f}"
+                eps = model.eps.safe_value
+                ia, ib = model.prior.a.safe_value, model.prior.b.safe_value
+                print_str = f"nELBO: {nelbo:.5f}  ws: {ws:.4f}  bs: {bs:.3E}  a: {ia:.4f}  b: {ib:.4f}  e: {eps:.3E}"
                 if log:
                     logger.log(f"       [{i:4d}]  {print_str}", is_tqdm=True)
                 return print_str
@@ -235,7 +239,10 @@ def main(args):
         key = random.PRNGKey(args.seed)
 
         valid_nll, valid_acc = valid_epoch(key, valid_loader, valid_step)
-        logger.log(f"[{0:3d}]  NLL: {valid_nll:.5f}  ACC: {valid_acc:.4f}")
+        logger.log(f"[{0:3d}]  NLL: {valid_nll:.5f}  ACC: {valid_acc:.2f}")
+
+        best_epoch, best_nll, best_acc, best_print_str = 0, valid_nll, valid_acc, ""
+        _ = checkpointer.step(0, valid_nll, model_vars)
 
         for epoch in trange(1, args.max_epoch + 1, desc="Epoch", ncols=0):
             key, split_key = random.split(key)
@@ -246,7 +253,7 @@ def main(args):
             valid_nll, valid_acc = valid_epoch(split_key, valid_loader, valid_step)
             logger.log(f"[{epoch:3d}]  NLL: {valid_nll:.5f}  ACC: {valid_acc:.2f}", is_tqdm=True)
 
-            updated = checkpointer.step(epoch, valid_nll, train_vars)
+            updated = checkpointer.step(epoch, valid_nll, model_vars)
             if updated:
                 best_epoch, best_nll, best_acc = epoch, valid_nll, valid_acc
                 best_print_str = train_log(epoch, train_nelbo, log=False)

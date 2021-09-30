@@ -23,8 +23,8 @@ def matmul3(mat0, mat1, mat2):
     return jnp.matmul(jnp.matmul(mat0, mat1), mat2)
 
 
-def jitter(num):
-    return 1e-6 * np.eye(num)
+def jitter(num, eps=1e-6):
+    return eps * np.eye(num)
 
 
 def split_kernel(kernel, num_11):
@@ -62,7 +62,7 @@ def test_log_likelihood(sampled_f, label):
     num_samples = sampled_f.shape[2]
     sampled_f_softmax = log_softmax(sampled_f, axis=0)  # [C, B, S]
     true_label_softmax = get_true_values(sampled_f_softmax, label)  # [B, S]
-    ll = jnp.sum(logsumexp(true_label_softmax, axis=1) - np.log(num_samples))
+    ll = jnp.mean(logsumexp(true_label_softmax, axis=1) - np.log(num_samples))
     return ll
 
 

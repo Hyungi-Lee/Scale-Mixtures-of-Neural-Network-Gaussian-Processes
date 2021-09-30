@@ -13,15 +13,12 @@ class NNGPKernel(Module):
         w_std: float = 1.0,
         b_std: float = 1.0,
         last_w_std: float = 1.0,
-        const_last_w_std: bool = False,
-        diag_reg: float = 0,
     ):
         super().__init__()
         self._get_kernel_fn = get_kernel_fn
         self.w_std = ConstraintTrainVar(jnp.array(w_std), constraint=positive())
         self.b_std = ConstraintTrainVar(jnp.array(b_std), constraint=positive())
         self.last_w_std = ConstraintTrainVar(jnp.array(last_w_std), constraint=positive())
-        self.diag_reg = diag_reg
 
     def K(self, kernel_fn, x, x2=None):
         if x2 is None:
@@ -29,8 +26,8 @@ class NNGPKernel(Module):
         else:
             return kernel_fn(x, x2, get="nngp")
 
-    def predict(self, kernel_fn, x, y, x_test):
-        predict_fn = gradient_descent_mse_ensemble(kernel_fn, x, y, diag_reg=self.diag_reg)
+    def predict(self, kernel_fn, x, y, x_test, eps=1e-6):
+        predict_fn = gradient_descent_mse_ensemble(kernel_fn, x, y, diag_reg=eps)
         mean, cov = predict_fn(x_test=x_test, get="nngp", compute_cov=True)
         return mean, cov
 
