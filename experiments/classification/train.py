@@ -50,6 +50,7 @@ def add_subparser(subparsers):
 
     parser.add_argument("-opt", "--optimizer",        choices=["adam", "sgd"], default="adam")
     parser.add_argument("-lr",  "--lr",               type=float, default=1e-2)
+    parser.add_argument("-lr2", "--lr2",              type=float, default=None)
     parser.add_argument("-lrd", "--lr-decay",         type=float, default=0.5)
     parser.add_argument("-lrt", "--lr-threshold",     type=float, default=1e-4)
     parser.add_argument("-lrp", "--lr-patience",      type=int, default=5)
@@ -70,6 +71,16 @@ def build_train_step(model, train_vars, optimizer, num_train, num_samples, jit=T
     return objax.Jit(train_step, grad_loss.vars() + optimizer.vars()) if jit else train_step
 
 
+def build_train_step2(model, train_vars1, train_vars2, opt1, opt2, opt_idx1, num_train, num_samples, jit=True):
+    grad_loss = objax.GradValues(model.loss, train_vars1 + train_vars2)
+    def train_step2(key, x_batch, y_batch, lr1, lr2):
+        g, v = grad_loss(key, x_batch, y_batch, num_train, num_samples)
+        opt1(lr1, [v for i, v in enumerate(g) if i in opt_idx1])
+        opt2(lr2, [v for i, v in enumerate(g) if i not in opt_idx1])
+        return v[0]
+    return objax.Jit(train_step2, grad_loss.vars() + opt1.vars("opt1") + opt2.vars("opt2")) if jit else train_step2
+
+
 def build_valid_step(model, num_samples, jit=True):
     def valid_step(key, x_batch, y_batch):
         nll, correct_count = model.test_acc_nll(key, x_batch, y_batch, num_samples)
@@ -77,14 +88,17 @@ def build_valid_step(model, num_samples, jit=True):
     return objax.Jit(valid_step, model.vars()) if jit else valid_step
 
 
-def train_epoch(key, train_loader, train_step, learning_rate, train_log):
+def train_epoch(key, train_loader, train_step, learning_rate, train_log, learning_rate2=None):
     total_nelbo = 0.
     lenb = len(train_loader)
     log_interval = len(train_loader) // 4
 
     for idx, (x_batch, y_batch) in tqdm(enumerate(train_loader), desc="Train", leave=False, ncols=0, total=lenb):
         key, split_key = random.split(key)
-        nelbo = train_step(split_key, x_batch, y_batch, learning_rate)
+        if learning_rate2 is None:
+            nelbo = train_step(split_key, x_batch, y_batch, learning_rate)
+        else:
+            nelbo = train_step(split_key, x_batch, y_batch, learning_rate, learning_rate2)
         total_nelbo += nelbo.item() * x_batch.shape[0]
         if (idx + 1) % log_interval == 0:
             train_log(idx + 1, nelbo)
@@ -211,12 +225,21 @@ def main(args):
                 return print_str
 
         # Optimizer
-        if args.optimizer == "adam":
-            optimizer = Adam(train_vars)
-        elif args.optimizer == "sgd":
-            optimizer = SGD(train_vars)
+        if args.lr2:
+            train_vars1 = VarCollection({k: v for k, v in model.vars().items() if "prior" not in k})
+            train_vars2 = VarCollection({k: v for k, v in model.vars().items() if "prior" in k})
+            opt_idx1 = [i for i, k in enumerate((train_vars1 + train_vars2).keys()) if "prior" not in k]
+            if args.optimizer == "adam":
+                optimizer1 = Adam(train_vars1)
+                optimizer2 = Adam(train_vars2)
+            elif args.optimizer == "sgd":
+                optimizer1 = SGD(train_vars1)
+                optimizer2 = SGD(train_vars2)
         else:
-            raise ValueError(f"Unsupported optimizer '{args.optimizer}'")
+            if args.optimizer == "adam":
+                optimizer = Adam(train_vars)
+            elif args.optimizer == "sgd":
+                optimizer = SGD(train_vars)
 
         scheduler = ReduceLROnPlateau(lr=args.lr, factor=args.lr_decay, patience=args.lr_patience)
 
@@ -232,7 +255,10 @@ def main(args):
         train_loader = DataLoader(x_train, y_train, batch_size=args.num_batch, shuffle=True, seed=args.seed)
         valid_loader = DataLoader(x_valid, y_valid, batch_size=args.num_batch, shuffle=False)
 
-        train_step = build_train_step(model, train_vars, optimizer, num_train, args.num_sample)
+        if args.lr2:
+            train_step = build_train_step2(model, train_vars1, train_vars2, optimizer1, optimizer2, opt_idx1, num_train, args.num_sample)
+        else:
+            train_step = build_train_step(model, train_vars, optimizer, num_train, args.num_sample)
         valid_step = build_valid_step(model, args.num_valid_sample)
 
         # Train
@@ -247,7 +273,7 @@ def main(args):
         for epoch in trange(1, args.max_epoch + 1, desc="Epoch", ncols=0):
             key, split_key = random.split(key)
 
-            train_nelbo = train_epoch(split_key, train_loader, train_step, scheduler.lr, train_log)
+            train_nelbo = train_epoch(split_key, train_loader, train_step, scheduler.lr, train_log, args.lr2)
             logger.log(f"[{epoch:3d}]  nELBO: {train_nelbo:.5f}", is_tqdm=True)
 
             valid_nll, valid_acc = valid_epoch(split_key, valid_loader, valid_step)

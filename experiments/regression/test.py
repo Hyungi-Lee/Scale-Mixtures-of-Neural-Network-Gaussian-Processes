@@ -81,6 +81,11 @@ def main(args):
         x_train, x_valid = x_train_valid[:num_train], x_train_valid[num_train:]
         y_train, y_valid = y_train_valid[:num_train], y_train_valid[num_train:]
 
+        x_train, y_train = jnp.array(x_train), jnp.array(y_train)
+        x_valid, y_valid = jnp.array(x_valid), jnp.array(y_valid)
+        x_test, y_test = jnp.array(x_test), jnp.array(y_test)
+        y_std, y_mean = jnp.array(y_std), jnp.array(y_mean)
+
         a = get_from_vars(saved_vars, "a")
         b = get_from_vars(saved_vars, "b")
         w_std = get_from_vars(saved_vars, "w_std")

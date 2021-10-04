@@ -5,6 +5,8 @@ from datetime import datetime
 import numpy as np
 from tqdm import tqdm
 
+from jax import numpy as jnp
+
 import objax
 from objax import VarCollection
 from objax.optimizer import SGD, Adam
@@ -105,6 +107,11 @@ def main(args):
         x_train_valid, y_train_valid = permute_dataset(x_train_valid, y_train_valid, seed=args.seed)
         x_train, x_valid = x_train_valid[:num_train], x_train_valid[num_train:]
         y_train, y_valid = y_train_valid[:num_train], y_train_valid[num_train:]
+
+        x_train, y_train = jnp.array(x_train), jnp.array(y_train)
+        x_valid, y_valid = jnp.array(x_valid), jnp.array(y_valid)
+        x_test, y_test = jnp.array(x_test), jnp.array(y_test)
+        y_std, y_mean = jnp.array(y_std), jnp.array(y_mean)
 
         # Model
         if args.network is None or args.network == "mlp":

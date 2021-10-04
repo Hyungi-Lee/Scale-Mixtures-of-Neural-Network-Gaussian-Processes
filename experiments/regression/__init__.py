@@ -2,6 +2,7 @@ from . import (
     test,
     train,
     data,
+    find,
 )
 
 
@@ -10,6 +11,5 @@ def add_subparser(subparsers):
     subparsers = parser.add_subparsers(metavar="ops")
 
     train.add_subparser(subparsers)
-    # train1.add_subparser(subparsers)
-    # test.add_subparser(subparsers)
     test.add_subparser(subparsers)
+    find.add_subparser(subparsers)

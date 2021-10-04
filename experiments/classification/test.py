@@ -76,6 +76,9 @@ def main(args):
         num_data=args.num_data, normalize=True,
     )
 
+    x_test = jnp.array(x_test)
+    y_test = jnp.array(y_test)
+
     # Load
     saved_vars = jnp.load(os.path.join(args.ckpt_dir, Checkpointer.FILE_FORMAT.format(args.ckpt_index)))
     context = jnp.load(os.path.join(args.ckpt_dir, "meta.npy"), allow_pickle=True).item()
@@ -131,14 +134,14 @@ def main(args):
         prior = InverseGammaPrior(alpha, beta)
 
     model = SVSP(prior, kernel, inducing_points, num_latent_gps=num_class)
-    model.kernel.w_std.assign(w_std)
-    model.kernel.b_std.assign(b_std)
-    model.kernel.last_w_std.assign(last_w_std)
-    model.q_mu.assign(q_mu)
-    model.q_sqrt.assign(q_sqrt)
+    model.kernel.w_std.assign(jnp.array(w_std))
+    model.kernel.b_std.assign(jnp.array(b_std))
+    model.kernel.last_w_std.assign(jnp.array(last_w_std))
+    model.q_mu.assign(jnp.array(q_mu))
+    model.q_sqrt.assign(jnp.array(q_sqrt))
     if method == "svtp":
-        model.prior.a.assign(a)
-        model.prior.b.assign(b)
+        model.prior.a.assign(jnp.array(a))
+        model.prior.b.assign(jnp.array(b))
 
     logger.log(f"Data: {data_name}")
     logger.log(f"Epoch: {args.ckpt_index}")

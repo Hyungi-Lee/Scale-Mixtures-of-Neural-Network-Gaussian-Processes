@@ -35,7 +35,7 @@ class GaussianLikelihood(Likelihood):
 
 
 class StudentTLikelihood(Likelihood):
-    require = ["cov_data", "y_data", "num_data"]
+    require = ["cov_data", "y_data"]
 
     def __init__(self, alpha, beta):
         super().__init__()
@@ -52,7 +52,8 @@ class StudentTLikelihood(Likelihood):
     def logpdf(self, x, mean, cov, aux):
         a = self.a.safe_value
         b = self.b.safe_value
-        cov_data, y_data, num_data = aux
+        cov_data, y_data = aux
+        num_data = cov_data.shape[-1]
 
         df = 2 * a
         cond_df = df + num_data

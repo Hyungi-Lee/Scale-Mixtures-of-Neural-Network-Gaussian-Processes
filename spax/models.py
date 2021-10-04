@@ -18,11 +18,11 @@ class SVSP(Module):
         self.prior = prior
         self.kernel = kernel
         self.num_latent_gps = num_latent_gps
-        self.inducing_variable = TrainVar(np.array(inducing_variable))
+        self.inducing_variable = TrainVar(jnp.array(inducing_variable))
         self.num_inducing = self.inducing_variable.shape[0]
-        self.q_mu = TrainVar(np.zeros((self.num_latent_gps, self.num_inducing)))
+        self.q_mu = TrainVar(jnp.zeros((self.num_latent_gps, self.num_inducing)))
         self.q_sqrt = ConstraintTrainVar(
-            np.ones((self.num_latent_gps, self.num_inducing)),
+            jnp.ones((self.num_latent_gps, self.num_inducing)),
             constraint=positive(),
         )
         self.eps = ConstraintTrainVar(np.array(eps), constraint=positive())
@@ -88,7 +88,7 @@ class SPR(Module):
         self.y_mean = y_mean
         self.y_std = y_std
         self.num_data = x_data.shape[0]
-        self.eps = ConstraintTrainVar(np.array(eps), constraint=positive())
+        self.eps = ConstraintTrainVar(jnp.array(eps), constraint=positive())
 
     def loss(self):
         eps = self.eps.safe_value
@@ -105,7 +105,7 @@ class SPR(Module):
         if require:
             if "cov_data" in require:
                 cov_data = self.kernel.K(kernel_fn, self.x_data) #+ jitter(self.num_data, eps=eps)  # TODO: check
-            aux_dict = dict(cov_data=cov_data, y_data=self.y_data, num_data=self.num_data)
+            aux_dict = dict(cov_data=cov_data, y_data=self.y_data)
             aux = tuple(aux_dict[k] for k in require)
         else:
             aux = None
